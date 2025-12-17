@@ -5,14 +5,14 @@ import numpy as np
 PID_ROLL_ANGLE = {"kp": 0.025, "ki": 0.0, "kd": 0.00, "i_max": 0.03, "i_min": -0.03}
 PID_PITCH_ANGLE = {"kp": 0.025, "ki": 0.0, "kd": 0.00, "i_max": 0.03, "i_min": -0.03}
 # 偏航：适度KP，无积分，极小D项
-PID_YAW_ANGLE = {"kp": 0.02, "ki": 0.0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
+PID_YAW_ANGLE = {"kp": 0.02, "ki": 0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
 
 # ========== 2. 速率内环PID参数（柔和输出，无积分） ==========
 # 横滚/俯仰：低KP，无积分，极小D项（避免抖动）
 PID_ROLL_RATE = {"kp": 0.09, "ki": 0.00, "kd": 0.0008, "i_max": 0.01, "i_min": -0.01}
 PID_PITCH_RATE = {"kp": 0.09, "ki": 0.00, "kd": 0.0008, "i_max": 0.01, "i_min": -0.01}
 # 偏航：适度KP，无积分，极小D项
-PID_YAW_RATE = {"kp": 0.8, "ki": 0.0, "kd": 0.01, "i_max": 0.01, "i_min": -0.01}
+PID_YAW_RATE = {"kp": 0.09, "ki": 0, "kd": 0.01, "i_max": 0.01, "i_min": -0.01}
 
 # ========== 3. 轴力矩缩放（默认1.0，无需调整） ==========
 ROLL_SCALE = 1.9
@@ -20,8 +20,8 @@ PITCH_SCALE = 1.9
 YAW_SCALE = 1.9
 
 # ========== 12. 陀螺仪死区（单位：rad/s） ==========
-GYRO_DEADBAND_ROLL_PITCH = 20
-GYRO_DEADBAND_YAW = 15
+GYRO_DEADBAND_ROLL_PITCH = 200
+GYRO_DEADBAND_YAW = 1.3
 # ========== 4. 电机补偿（无硬件偏差则全0） ==========
 MOTOR_GAIN = [1.0, 1.0, 1.0, 1.0]  # 电机增益补偿
 PITCH_COMP = [0, 0, 0, 0]          # 俯仰补偿

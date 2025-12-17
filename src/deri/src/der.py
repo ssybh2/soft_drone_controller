@@ -232,13 +232,13 @@ class BalanceController(Node):
             "angle_zero_point": None,
             "initialized": False,
             "torque_limit_roll_pitch": 1.3,
-            "torque_limit_yaw": 1.9,  # Yaw扭矩适中，电机均衡
+            "torque_limit_yaw": 1.3,  # Yaw扭矩适中，电机均衡
             "last_debug_time": 0.0
         }
         self.gyro_deadband_roll_pitch = cfg.GYRO_DEADBAND_ROLL_PITCH
         self.gyro_deadband_yaw = cfg.GYRO_DEADBAND_YAW
         self.yaw_stick_scale = 0.2  # 摇杆灵敏度适配，旋转有力不突兀
-        self.yaw_dshot_gain = 1.0  # 温和放大，兼顾力度与均衡
+        self.yaw_dshot_gain = 0.2  # 温和放大，兼顾力度与均衡
         
     # ========== 回调函数 ==========
     def _rc_callback(self, msg):
@@ -257,19 +257,21 @@ class BalanceController(Node):
             roll, pitch, current_yaw = quat2eul(w, x, y, z)
             
             # 【修改5：修正Pitch角度符号（解决Pitch飞行方向反向）】
-            # 原：pitch = -pitch → 现：恢复pitch原始符号（删掉-号）
+            
             pitch = -pitch  # 删掉这行！
             current_yaw = -current_yaw  # Yaw符号保留（按需调整）
              
             if self.state["angle_zero_point"] is None:
                 self.state["angle_zero_point"] = np.array([roll, pitch])
                 self.state["initialized"] = True
+                self.last_yaw = current_yaw
                 self.yaw_setpoint = current_yaw  # 初始化Yaw期望=当前值
             
             # Roll/Pitch归零，Yaw期望=当前实际值（严格随动）
             roll_zeroed = roll - self.state["angle_zero_point"][0]
             pitch_zeroed = pitch - self.state["angle_zero_point"][1]
-            self.yaw_setpoint = current_yaw  # 关键：每帧更新期望=当前实际Yaw
+            self.yaw_setpoint = self.last_yaw   # 关键：每帧更新期望=当前实际Yaw
+            self.last_yaw = current_yaw
             
             self.imu_data["roll"] = roll_zeroed
             self.imu_data["pitch"] = pitch_zeroed
@@ -495,4 +497,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

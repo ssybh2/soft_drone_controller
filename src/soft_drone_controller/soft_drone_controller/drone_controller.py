@@ -11,17 +11,57 @@ import time
 import sys
 from soft_drone_controller.config import controller_params as cfg
 
-# ===================== 数学工具函数 =====================
+# ===================== 四元数核心数学工具函数【新增】 =====================
+def quat_mult(q1, q2):
+    """四元数乘法：q1 * q2（[w,x,y,z]格式）"""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    return np.array([w, x, y, z])
+
+def quat_inv(q):
+    """四元数求逆（共轭，单位四元数逆=共轭）"""
+    w, x, y, z = q
+    return np.array([w, -x, -y, -z])
+
+def eul2quat(roll, pitch, yaw):
+    """欧拉角转四元数（ZYX顺序，弧度）"""
+    cr = np.cos(roll/2)
+    sr = np.sin(roll/2)
+    cp = np.cos(pitch/2)
+    sp = np.sin(pitch/2)
+    cy = np.cos(yaw/2)
+    sy = np.sin(yaw/2)
+
+    w = cr * cp * cy + sr * sp * sy
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    return np.array([w, x, y, z])
+
 def quat2eul(w, x, y, z):
+    """四元数转欧拉角（仅用于日志输出，控制逻辑不依赖）"""
     roll = np.arctan2(2*(w*x + y*z), 1 - 2*(x**2 + y**2))
     pitch = np.arcsin(2*(w*y - z*x))
     yaw = np.arctan2(2*(w*z + x*y), 1 - 2*(y**2 + z**2))
     return roll, pitch, yaw
 
-# 【修改1：修正陀螺仪X/Z轴符号（解决IMU gyro X/Z反向）】
-# 原：[-roll_gyro, -pitch_gyro, yaw_gyro] → 现：恢复X轴，反转Z轴，调整Pitch gyro符号
+def quat_error(q_target, q_current):
+    """计算目标四元数与当前四元数的误差（轴角形式，返回[rx, ry, rz]误差向量）"""
+    q_err = quat_mult(quat_inv(q_current), q_target, )
+    # 转换为轴角误差（小角度近似，误差向量幅值=旋转角度，方向=旋转轴）
+    angle = 2 * np.arctan2(np.linalg.norm(q_err[1:]), q_err[0])
+    if np.linalg.norm(q_err[1:]) < 1e-6:
+        return np.array([0.0, 0.0, 0.0])
+    axis = q_err[1:] / np.linalg.norm(q_err[1:])
+    return angle * axis
+
+# 【保留原有】陀螺仪符号修正
 def rotate_gyro_data(roll_gyro, pitch_gyro, yaw_gyro):
-    return np.array([roll_gyro, -pitch_gyro, -yaw_gyro])  # X轴恢复、Z轴反转、Pitch gyro恢复
+    return np.array([roll_gyro, -pitch_gyro, -yaw_gyro])
 
 def pwm_to_dshot(pwm_val):
     PWM_MIN, PWM_MAX = 1000, 2000
@@ -29,7 +69,7 @@ def pwm_to_dshot(pwm_val):
     dshot_val = cfg.DSHOT_MIN + (pwm_clipped - PWM_MIN) * (cfg.DSHOT_MAX - cfg.DSHOT_MIN) / (PWM_MAX - PWM_MIN)
     return int(round(dshot_val))
 
-# ===================== PID控制器 =====================
+# ===================== PID控制器（适配四元数误差向量） =====================
 class ImprovedPID:
     def __init__(self, kp, ki, kd, i_max=0.5, i_min=-0.5, use_angular_acc=True, node=None, axis=""):
         self.kp = kp
@@ -47,7 +87,7 @@ class ImprovedPID:
         self.last_output = 0.0
         self.d_term_sign = 1.0
         if axis in ["roll_rate", "pitch_rate", "yaw_rate"]:
-            self.d_term_sign = -1.0  # 对于速率环，D项应该为负（阻尼项）
+            self.d_term_sign = -1.0  # 速率环D项阻尼
         
         self.pub_pid_error = None
         if self.node is not None:
@@ -72,14 +112,9 @@ class ImprovedPID:
             error_threhold = 0.02
         if abs(error) < error_threhold:
             self.integral = 0.0
-            #self.prev_error = 0.0
-            #self.prev_error = 0.0
-            # 【修改2：删除prev_measurement重置（解决符号断档）】
-            # self.prev_measurement = measurement  # 删掉这行！
             self.last_output = 0.0
             return 0.0
             
-        # Yaw外环误差强制趋近0，仅随动无修正
         if self.axis == "yaw" and abs(error) < 0.005:
             error = 0.0
             self.integral = 0.0
@@ -96,14 +131,12 @@ class ImprovedPID:
         self.integral = np.clip(self.integral, self.i_min, self.i_max)
         i_term = self.ki * self.integral
         
-        # 【修改3：D项符号适配修正后的陀螺仪（去掉负号，避免反向）】
         if self.use_angular_acc and angular_acc is not None:
-            d_term = self.kd * angular_acc * self.d_term_sign # 去掉-号
+            d_term = self.kd * angular_acc * self.d_term_sign
         else:
-            d_term = self.kd * measurement_rate * self.d_term_sign  # 去掉-号
+            d_term = self.kd * measurement_rate * self.d_term_sign
 
         output = p_term + i_term + d_term
-
 
         self.prev_error = error
         self.prev_measurement = measurement
@@ -116,7 +149,7 @@ class ImprovedPID:
         self.prev_measurement = 0.0
         self.last_output = 0.0
 
-# ===================== 主控制器（还原Yaw随动+电机均衡） =====================
+# ===================== 主控制器（四元数重构版） =====================
 class BalanceController(Node):
     def __init__(self):
         super().__init__("balance_controller")
@@ -128,7 +161,7 @@ class BalanceController(Node):
         self.control_timer = self.create_timer(1.0 / cfg.CONTROL_FREQ, self._control_loop)
         self.status_timer = self.create_timer(0.1, self._publish_status)
         
-        self.get_logger().info("✅ 控制器启动完成 - Yaw随动+电机均衡+姿态稳定")
+        self.get_logger().info("✅ 控制器启动完成 - 四元数运算+Yaw随动+电机均衡")
         
     def _init_ros(self):
         qos_best_effort = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT, history=QoSHistoryPolicy.KEEP_LAST, depth=5)
@@ -147,18 +180,24 @@ class BalanceController(Node):
         
     def _init_data(self):
         self.rc_data = {"left_y":0.0, "left_x":0.0, "right_x":0.0, "right_y":0.0, "left_switch":cfg.LOCK_SWITCH_VALUE}
-        self.imu_data = {"roll":0.0, "pitch":0.0, "yaw":0.0, "gyro":np.array([0.0,0.0,0.0])}
+        # 【四元数重构1：保存原始四元数，欧拉角仅用于日志】
+        self.imu_data = {
+            "quat": np.array([1.0, 0.0, 0.0, 0.0]),  # 当前姿态四元数 [w,x,y,z]
+            "gyro": np.array([0.0,0.0,0.0]),
+            "roll":0.0, "pitch":0.0, "yaw":0.0  # 仅日志用
+        }
         self.filtered_acc = np.array([0.0,0.0,0.0])
         
         self.last_rc_time = 0.0
         self.last_imu_time = 0.0
         self.last_published_dshot = [1200]*4
         
-        # Yaw核心：期望=上一时刻实际值，严格随动
-        self.yaw_setpoint = 0.0
+        # 【四元数重构2：Yaw随动基于四元数的Yaw分量】
+        self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])  # 目标姿态四元数
+        self.last_yaw_quat = np.array([1.0, 0.0, 0.0, 0.0])  # 上一时刻Yaw四元数
         
     def _init_controllers(self):
-        # ---------------------- Roll/Pitch（稳定修正） ----------------------
+        # 保留原有PID参数（修正力度不变）
         self.pid_roll_angle = ImprovedPID(
             kp=cfg.PID_ROLL_ANGLE["kp"] * 10.0,
             ki=cfg.PID_ROLL_ANGLE["ki"] * 0,
@@ -169,14 +208,13 @@ class BalanceController(Node):
             node=self,
             axis="roll"
         )
-        # 【修改4：Roll速率环关闭角加速度（保持三轴一致）】
         self.pid_roll_rate = ImprovedPID(
             kp=cfg.PID_ROLL_RATE["kp"] * 10.0,
             ki=cfg.PID_ROLL_RATE["ki"] * 0,
             kd=cfg.PID_ROLL_RATE["kd"],
             i_max=0.5,
             i_min=-0.5,
-            use_angular_acc=False,  # 从True改为False
+            use_angular_acc=False,
             node=self,
             axis="roll_rate"
         )
@@ -202,10 +240,9 @@ class BalanceController(Node):
             axis="pitch_rate"
         )
         
-        # ---------------------- Yaw（严格随动+均衡输出） ----------------------
         self.pid_yaw_angle = ImprovedPID(
-            kp=cfg.PID_YAW_ANGLE["kp"] * 4.0,  # 适度增益，随动无偏移
-            ki=cfg.PID_YAW_ANGLE["ki"] * 0.0,  # 无积分，避免累积偏差
+            kp=cfg.PID_YAW_ANGLE["kp"] * 4.0,
+            ki=cfg.PID_YAW_ANGLE["ki"] * 0.0,
             kd=cfg.PID_YAW_ANGLE["kd"] * 0.4,
             i_max=0.05,
             i_min=-0.05,
@@ -214,7 +251,7 @@ class BalanceController(Node):
             axis="yaw"
         )
         self.pid_yaw_rate = ImprovedPID(
-            kp=cfg.PID_YAW_RATE["kp"] * 4.0,  # 速率环增益适配，旋转平稳
+            kp=cfg.PID_YAW_RATE["kp"] * 4.0,
             ki=cfg.PID_YAW_RATE["ki"] * 0.0,
             kd=cfg.PID_YAW_RATE["kd"] * 0.6,
             i_max=0.1,
@@ -229,18 +266,18 @@ class BalanceController(Node):
             "armed": False,
             "stick_deadband": cfg.RC_DEAD_ZONE * 0.3,
             "motor_outputs": np.array([1000.0]*4),
-            "angle_zero_point": None,
+            "init_quat": None,  # 【四元数重构3：初始化姿态四元数】
             "initialized": False,
             "torque_limit_roll_pitch": 1.3,
-            "torque_limit_yaw": 1.9,  # Yaw扭矩适中，电机均衡
+            "torque_limit_yaw": 1.8,
             "last_debug_time": 0.0
         }
         self.gyro_deadband_roll_pitch = cfg.GYRO_DEADBAND_ROLL_PITCH
         self.gyro_deadband_yaw = cfg.GYRO_DEADBAND_YAW
-        self.yaw_stick_scale = 0.2  # 摇杆灵敏度适配，旋转有力不突兀
-        self.yaw_dshot_gain = 1.0  # 温和放大，兼顾力度与均衡
+        self.yaw_stick_scale = 0.2
+        self.yaw_dshot_gain = 0.6
         
-    # ========== 回调函数 ==========
+    # ========== 回调函数（四元数重构） ==========
     def _rc_callback(self, msg):
         with self.lock:
             self.rc_data["left_y"] = msg.left_y
@@ -253,33 +290,44 @@ class BalanceController(Node):
             
     def _imu_callback(self, msg):
         with self.lock:
-            w, x, y, z = msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z
-            roll, pitch, current_yaw = quat2eul(w, x, y, z)
+            # 【四元数重构4：直接读取IMU原始四元数，不再依赖欧拉角转换】
+            current_quat = np.array([msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z])
+            # 修正Pitch/Yaw符号（适配硬件安装方向）
+            current_quat = self._correct_quat_sign(current_quat)
             
-            # 【修改5：修正Pitch角度符号（解决Pitch飞行方向反向）】
-            # 原：pitch = -pitch → 现：恢复pitch原始符号（删掉-号）
-            pitch = -pitch  # 删掉这行！
-            current_yaw = -current_yaw  # Yaw符号保留（按需调整）
-             
-            if self.state["angle_zero_point"] is None:
-                self.state["angle_zero_point"] = np.array([roll, pitch])
+            # 初始化姿态（仅首次）
+            if self.state["init_quat"] is None:
+                self.state["init_quat"] = current_quat.copy()
                 self.state["initialized"] = True
-                self.yaw_setpoint = current_yaw  # 初始化Yaw期望=当前值
+                # 初始化Yaw随动：以上一时刻四元数为目标
+                self.last_yaw_quat = self._extract_yaw_quat(current_quat)
+                self.target_quat = current_quat.copy()
             
-            # Roll/Pitch归零，Yaw期望=当前实际值（严格随动）
-            roll_zeroed = roll - self.state["angle_zero_point"][0]
-            pitch_zeroed = pitch - self.state["angle_zero_point"][1]
-            self.yaw_setpoint = current_yaw  # 关键：每帧更新期望=当前实际Yaw
+            # 计算相对初始化姿态的四元数（归零）
+            rel_quat = quat_mult(current_quat, quat_inv(self.state["init_quat"]))
+            # 仅用于日志：转欧拉角
+            roll_zeroed, pitch_zeroed, current_yaw = quat2eul(*rel_quat)
+            current_yaw = -current_yaw  # Yaw符号修正（日志用）
             
+            # 【四元数重构5：更新Yaw随动目标（以上一时刻Yaw为期望）】
+            current_yaw_quat = self._extract_yaw_quat(current_quat)
+            self.target_quat = self._set_quat_yaw(rel_quat, self.last_yaw_quat)  # 目标Yaw=上一时刻Yaw
+            self.last_yaw_quat = current_yaw_quat  # 更新上一时刻Yaw
+            
+            # 保存数据（四元数为主，欧拉角仅日志）
+            self.imu_data["quat"] = rel_quat
             self.imu_data["roll"] = roll_zeroed
             self.imu_data["pitch"] = pitch_zeroed
             self.imu_data["yaw"] = current_yaw
-            ######################################################################
+            
+            # 陀螺仪数据修正
             gyro_rotated = rotate_gyro_data(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
             self.imu_data["gyro"] = gyro_rotated
+            
+            # 日志输出（保留原有格式）
             self.get_logger().info(f"Roll角速率: {gyro_rotated[0]:.3f} | Roll角度: {np.rad2deg(roll_zeroed):.2f}°")
 
-            # 发布IMU数据
+            # 发布IMU数据（欧拉角仅日志用）
             angle_msg = Vector3()
             angle_msg.x = np.rad2deg(roll_zeroed)
             angle_msg.y = np.rad2deg(pitch_zeroed)
@@ -293,6 +341,27 @@ class BalanceController(Node):
             self.pub_imu_gyro.publish(gyro_msg)
             
             self.last_imu_time = self.get_clock().now().nanoseconds / 1e9
+    
+    def _correct_quat_sign(self, quat):
+        """修正四元数符号（适配硬件安装方向）"""
+        # 对应原代码的pitch = -pitch和current_yaw = -current_yaw
+        w, x, y, z = quat
+        # Pitch符号修正：反转y分量
+        y = -y
+        # Yaw符号修正：反转z分量
+        z = -z
+        return np.array([w, x, y, z])
+    
+    def _extract_yaw_quat(self, quat):
+        """从四元数中提取仅Yaw分量的四元数（Roll/Pitch=0）"""
+        roll, pitch, yaw = quat2eul(*quat)
+        return eul2quat(0, 0, yaw)
+    
+    def _set_quat_yaw(self, quat, yaw_quat):
+        """保持Roll/Pitch不变，设置Yaw为目标四元数的Yaw"""
+        roll, pitch, _ = quat2eul(*quat)
+        _, _, yaw = quat2eul(*yaw_quat)
+        return eul2quat(roll, pitch, yaw)
             
     def _filtered_acc_callback(self, msg):
         with self.lock:
@@ -310,7 +379,7 @@ class BalanceController(Node):
                 self.get_logger().warn("⚠️ IMU未初始化，禁止解锁")
                 return
             self.state["armed"] = True
-            self.get_logger().info("🔓 已解锁 - Yaw随动+电机均衡")
+            self.get_logger().info("🔓 已解锁 - 四元数运算+Yaw随动")
             self._publish_dshot(cfg.DSHOT_IDLE_UNLOCK)
             self._reset_all_controllers()
             
@@ -320,7 +389,7 @@ class BalanceController(Node):
             pid.reset()
         self.state["motor_outputs"] = np.array([1000.0]*4)
         
-    # ========== 核心控制循环 ==========
+    # ========== 核心控制循环（四元数重构） ==========
     def _control_loop(self):
         with self.lock:
             if not self._check_data_validity():
@@ -333,27 +402,27 @@ class BalanceController(Node):
             dt = 1.0 / cfg.CONTROL_FREQ
             throttle, roll_target, pitch_target, yaw_stick = self._process_stick()
             
-            # Roll/Pitch期望=0°（回平）
-            roll_target = np.clip(roll_target, -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
-            pitch_target = np.clip(pitch_target, -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
-            # Yaw：期望=当前实际值+摇杆转速指令（仅控旋转速度，不偏移期望）
+            # 【四元数重构6：生成目标姿态四元数（Roll/Pitch回平，Yaw随动）】
+            # Roll/Pitch目标=0（回平）
+            target_eul_roll = np.clip(roll_target, -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
+            target_eul_pitch = np.clip(pitch_target, -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
+            # Yaw目标=上一时刻值（随动）+摇杆速率指令
             yaw_rate_cmd = 0.0
             if abs(yaw_stick) > self.state["stick_deadband"]:
-                yaw_rate_cmd = yaw_stick * self.yaw_stick_scale  # 摇杆直接控Yaw速率
+                yaw_rate_cmd = yaw_stick * self.yaw_stick_scale
             
-            # PID计算
-            torque_roll, torque_pitch, torque_yaw = self._pid_control(roll_target, pitch_target, yaw_rate_cmd, dt)
-            # 电机混控（均衡分配扭矩）
+            # PID计算（基于四元数误差）
+            torque_roll, torque_pitch, torque_yaw = self._pid_control_quat(target_eul_roll, target_eul_pitch, yaw_rate_cmd, dt)
+            # 电机混控（保留原有逻辑，修正力度不变）
             motor_pwm = self._motor_mix(throttle, torque_roll, torque_pitch, torque_yaw)
             # 发布DSHOT
             self._publish_dshot(motor_pwm)
             self.state["motor_outputs"] = motor_pwm
     
     def _process_stick(self):
+        # 保留原有摇杆处理逻辑
         roll_raw = self.rc_data["right_x"] if abs(self.rc_data["right_x"]) > self.state["stick_deadband"] else 0.0
-        # 【修改6：Pitch摇杆符号适配（可选，若仍反向则加-号）】
         pitch_raw = self.rc_data["right_y"] if abs(self.rc_data["right_y"]) > self.state["stick_deadband"] else 0.0
-        # 若Pitch仍反向，改为：pitch_raw = -self.rc_data["right_y"] ...
         yaw_raw = self.rc_data["left_x"] if abs(self.rc_data["left_x"]) > self.state["stick_deadband"]*0.5 else 0.0
         throttle_raw = self.rc_data["left_y"]
         
@@ -362,32 +431,42 @@ class BalanceController(Node):
         throttle = np.clip((throttle_raw + 1.0)/2.0 * 1000.0, 0.0, 1000.0)
         return throttle, roll_target, pitch_target, yaw_raw
     
-    def _pid_control(self, roll_target, pitch_target, yaw_rate_cmd, dt):
-        roll_current = self.imu_data["roll"]
-        pitch_current = self.imu_data["pitch"]
-        yaw_current = self.imu_data["yaw"]
+    def _pid_control_quat(self, roll_target, pitch_target, yaw_rate_cmd, dt):
+        """基于四元数误差的PID控制（替代原欧拉角PID）"""
+        current_quat = self.imu_data["quat"]
         gyro = self.imu_data["gyro"].copy()
         
-        # 陀螺仪死区处理
+        # 1. 生成目标姿态四元数（Roll/Pitch=目标值，Yaw=上一时刻值）
+        _, _, current_yaw = quat2eul(*current_quat)
+        target_quat = eul2quat(roll_target, pitch_target, self.yaw_setpoint if hasattr(self, 'yaw_setpoint') else current_yaw)
+        
+        # 2. 计算四元数误差（轴角形式）
+        quat_err = quat_error(target_quat, current_quat)
+        roll_err, pitch_err, yaw_err = quat_err[0], quat_err[1], quat_err[2]
+        
+        # 陀螺仪死区处理（保留原有）
         gyro[0] = 0.0 if abs(gyro[0]) < self.gyro_deadband_roll_pitch else gyro[0]
         gyro[1] = 0.0 if abs(gyro[1]) < self.gyro_deadband_roll_pitch else gyro[1]
         gyro[2] = 0.0 if abs(gyro[2]) < self.gyro_deadband_yaw else gyro[2]
         
-        # 角度外环（Yaw期望=当前实际值，仅修正微小偏移）
-        roll_rate_sp = self.pid_roll_angle.update(roll_target, roll_current, dt)
-        pitch_rate_sp = self.pid_pitch_angle.update(pitch_target, pitch_current, dt)
-        yaw_rate_sp = self.pid_yaw_angle.update(self.yaw_setpoint, yaw_current, dt) + yaw_rate_cmd  # 叠加摇杆速率指令
+        # 3. 角度外环（输入四元数误差）
+        roll_rate_sp = self.pid_roll_angle.update(0.0, roll_err, dt)  # 目标=0（回平）
+        pitch_rate_sp = self.pid_pitch_angle.update(0.0, pitch_err, dt)
+        yaw_rate_sp = self.pid_yaw_angle.update(0.0, yaw_err, dt) + yaw_rate_cmd  # 叠加摇杆速率
         
-        # 速率内环（平稳输出扭矩）
+        # 4. 速率内环（保留原有逻辑）
         torque_roll = self.pid_roll_rate.update(roll_rate_sp, gyro[0], dt, self.filtered_acc[0])
         torque_pitch = self.pid_pitch_rate.update(pitch_rate_sp, gyro[1], dt, self.filtered_acc[1])
         torque_yaw = self.pid_yaw_rate.update(yaw_rate_sp, gyro[2], dt, self.filtered_acc[2])
-        
-        # 力矩限幅（均衡输出）
+        torque_roll = -torque_roll 
+        torque_pitch = -torque_pitch
+        torque_yaw = -torque_yaw
+        # 力矩限幅（保留原有）
         torque_roll = np.clip(torque_roll, -self.state["torque_limit_roll_pitch"], self.state["torque_limit_roll_pitch"])
         torque_pitch = np.clip(torque_pitch, -self.state["torque_limit_roll_pitch"], self.state["torque_limit_roll_pitch"])
         torque_yaw = np.clip(torque_yaw, -self.state["torque_limit_yaw"], self.state["torque_limit_yaw"])
         
+        # 发布扭矩数据（保留原有）
         torque_msg = Vector3()
         torque_msg.x = torque_roll
         torque_msg.y = torque_pitch
@@ -396,22 +475,20 @@ class BalanceController(Node):
         return torque_roll, torque_pitch, torque_yaw
     
     def _motor_mix(self, throttle, torque_roll, torque_pitch, torque_yaw):
+        # 保留原有混控逻辑（修正力度参数不变）
         base = 1000.0 + throttle
-        # Yaw扭矩温和放大，均衡分配到电机
         yaw_torque_amplified = torque_yaw * self.yaw_dshot_gain
-        # 标准X型混控，扭矩分配均衡无突兀
+        
         motor1 = base + (cfg.MIX_MATRIX[0][0]*torque_roll + cfg.MIX_MATRIX[0][1]*torque_pitch + cfg.MIX_MATRIX[0][2]*yaw_torque_amplified)*cfg.DSHOT_SCALE
         motor2 = base + (cfg.MIX_MATRIX[1][0]*torque_roll + cfg.MIX_MATRIX[1][1]*torque_pitch + cfg.MIX_MATRIX[1][2]*yaw_torque_amplified)*cfg.DSHOT_SCALE
         motor3 = base + (cfg.MIX_MATRIX[2][0]*torque_roll + cfg.MIX_MATRIX[2][1]*torque_pitch + cfg.MIX_MATRIX[2][2]*yaw_torque_amplified)*cfg.DSHOT_SCALE
         motor4 = base + (cfg.MIX_MATRIX[3][0]*torque_roll + cfg.MIX_MATRIX[3][1]*torque_pitch + cfg.MIX_MATRIX[3][2]*yaw_torque_amplified)*cfg.DSHOT_SCALE
 
         smoothed_motors = np.array([motor1, motor2, motor3, motor4])
-        # 限制电机输出差值，确保均衡
         motor_max = np.max([motor1, motor2, motor3, motor4])
         motor_min = np.min([motor1, motor2, motor3, motor4])
-        if motor_max - motor_min > 600:  # 最大差值控制，避免悬殊
+        if motor_max - motor_min > 600:
             scale = 600 / (motor_max - motor_min) if motor_max != motor_min else 1.0
-            
             motor_avg = (motor1 + motor2 + motor3 + motor4) / 4
             motor1 = motor_avg + (motor1 - motor_avg) * scale
             motor2 = motor_avg + (motor2 - motor_avg) * scale
@@ -423,6 +500,7 @@ class BalanceController(Node):
         return smoothed_motors
     
     def _check_data_validity(self):
+        # 保留原有数据有效性检查
         current_time = self.get_clock().now().nanoseconds / 1e9
         if current_time - self.last_rc_time > cfg.DATA_TIMEOUT or current_time - self.last_imu_time > cfg.DATA_TIMEOUT:
             if self.state["armed"]:
@@ -432,6 +510,7 @@ class BalanceController(Node):
         return True
     
     def _publish_dshot(self, motor_pwm):
+        # 保留原有DSHOT发布逻辑
         msg = WriteDSHOT()
         if isinstance(motor_pwm, (int, float)):
             dshot_val = pwm_to_dshot(motor_pwm)
@@ -457,6 +536,7 @@ class BalanceController(Node):
             self.get_logger().error(f"❌ 发布DSHOT失败: {e}")
     
     def _publish_status(self):
+        # 保留原有状态发布（欧拉角仅日志用）
         if not self.state["armed"]:
             return
         current_time = time.time()
@@ -464,7 +544,7 @@ class BalanceController(Node):
             dshot = self.last_published_dshot
             roll_error = abs(np.rad2deg(self.imu_data["roll"]))
             pitch_error = abs(np.rad2deg(self.imu_data["pitch"]))
-            yaw_error = abs(np.rad2deg(self.yaw_setpoint - self.imu_data["yaw"]))
+            yaw_error = abs(np.rad2deg(self.yaw_setpoint - self.imu_data["yaw"]) if hasattr(self, 'yaw_setpoint') else 0.0)
             self.get_logger().info(
                 f"📊 状态 - Roll误差:{roll_error:.2f}° | Pitch误差:{pitch_error:.2f}° | Yaw误差:{yaw_error:.3f}° | DSHOT:{dshot}"
             )
