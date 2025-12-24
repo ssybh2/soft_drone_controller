@@ -1,167 +1,574 @@
 #!/usr/bin/env python3
+"""
+无人机位置控制器（简化版） - 带详细调试信息
+修正了动捕坐标系到无人机机体坐标系的转换
+增加角度（度）输出话题
+修复了高度控制问题
+"""
+
 import rclpy
 import numpy as np
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from geometry_msgs.msg import PoseStamped, Vector3
-# 导入你的配置文件，保持参数体系一致
-from soft_drone_controller.config import controller_params as cfg
+import time
 
-# 位置PID控制器（复用飞控的PID核心逻辑，适配位置控制场景）
-class PositionPID:
-    def __init__(self, kp, ki, kd, max_output, axis=""):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.max_output = max_output  # 输出限幅（防止姿态角/油门过大）
-        self.axis = axis
-        
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self.last_time = 0.0
-
-    def update(self, setpoint, measured, dt):
-        if dt <= 0:
-            dt = 1.0 / cfg.CONTROL_FREQ  # 与飞控控制频率同步
-        
-        # 核心PID计算
-        error = setpoint - measured
-        self.integral += error * dt
-        self.integral = np.clip(self.integral, -self.max_output/2, self.max_output/2)  # 积分限幅
-        derivative = (error - self.prev_error) / dt if self.last_time != 0 else 0.0
-        
-        output = self.kp * error + self.ki * self.integral + self.kd * derivative
-        output = np.clip(output, -self.max_output, self.max_output)  # 输出限幅
-        
-        # 更新状态
-        self.prev_error = error
-        self.last_time = dt
-        return output
-
-# 位置控制器主节点（核心：动捕位置反馈→飞控姿态/油门目标）
 class DronePositionController(Node):
     def __init__(self):
+        """位置控制器初始化"""
         super().__init__("drone_position_controller")
-        self._init_qos()          # 初始化QoS配置（匹配飞控）
-        self._init_pid()          # 初始化位置PID参数
-        self._init_ros_topics()   # 初始化订阅/发布话题
-        self._init_data()         # 初始化数据存储
         
-        # 控制定时器（频率与飞控一致，默认cfg.CONTROL_FREQ）
-        self.control_timer = self.create_timer(1.0 / cfg.CONTROL_FREQ, self._control_loop)
-        self.get_logger().info("✅ 位置控制器启动完成 - 适配BalanceController飞控")
-
-    def _init_qos(self):
-        """匹配飞控的QoS配置，保证数据传输稳定性"""
-        self.qos_best_effort = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=5
-        )
-        self.qos_reliable = QoSProfile(
-            reliability=QoSReliabilityPolicy.RELIABLE,
+        # 导入配置参数
+        from soft_drone_controller.config import controller_params as cfg
+        
+        # 保存配置引用
+        self.cfg = cfg
+        
+        # 初始化ROS话题
+        self._init_ros_topics()
+        
+        # 初始化数据存储
+        self._init_data()
+        
+        # 初始化PID状态
+        self._init_pid_state()
+        
+        # 创建控制循环定时器
+        control_interval = 1.0 / self.cfg.POSITION_CONTROL_FREQ
+        self.control_timer = self.create_timer(control_interval, self._control_loop)
+        
+        # 状态发布定时器（2Hz）
+        self.status_timer = self.create_timer(0.5, self._publish_status)
+        
+        # 详细调试信息发布定时器（10Hz）
+        self.debug_timer = self.create_timer(0.1, self._publish_detailed_debug)
+        
+        self.get_logger().info("✅ 无人机位置控制器启动完成")
+        self.get_logger().info(f"📡 控制频率: {self.cfg.POSITION_CONTROL_FREQ}Hz")
+        
+    def _init_ros_topics(self):
+        """初始化ROS话题"""
+        qos_reliable = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
             depth=10
         )
-
-    def _init_pid(self):
-        """初始化位置PID参数（需根据无人机实测调试）"""
-        # X/Y轴：位置误差→姿态角（max_output=最大倾斜角，单位rad）
-        self.pid_x = PositionPID(kp=0.8, ki=0.02, kd=0.1, max_output=np.deg2rad(15), axis="x")  # X→pitch
-        self.pid_y = PositionPID(kp=0.8, ki=0.02, kd=0.1, max_output=np.deg2rad(15), axis="y")  # Y→roll
-        # Z轴：位置误差→油门（max_output=油门增量，0-1000）
-        self.pid_z = PositionPID(kp=50.0, ki=1.0, kd=5.0, max_output=200.0, axis="z")
-
-    def _init_ros_topics(self):
-        """定义所有订阅/发布话题"""
-        # 1. 订阅动捕的无人机实际位置（核心反馈）
-        self.sub_mocap_pose = self.create_subscription(
-            PoseStamped,
-            "/Tracker0/pose",  # 动捕发布的刚体位置话题（需与你的动捕配置一致）
-            self._mocap_pose_callback,
-            self.qos_best_effort
+        qos_best_effort = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.QoSReliabilityPolicy.BEST_EFFORT,
+            depth=5
         )
-        # 2. 订阅外部目标位置（可通过ros2 topic pub手动发布测试）
-        self.sub_target_pose = self.create_subscription(
+        
+        # 订阅动捕系统位置
+        self.sub_mocap = self.create_subscription(
+            PoseStamped,
+            "/Tracker0/pose",
+            self._mocap_callback,
+            qos_best_effort
+        )
+        
+        # 订阅目标位置
+        self.sub_target = self.create_subscription(
             PoseStamped,
             "/drone_target_pose",
-            self._target_pose_callback,
-            self.qos_reliable
+            self._target_callback,
+            qos_reliable
         )
-        # 3. 发布位置控制指令给飞控（核心输出）
-        self.pub_pos_cmd = self.create_publisher(
+        
+        # 发布姿态指令给飞控（弧度）
+        self.pub_attitude_cmd = self.create_publisher(
             Vector3,
-            "/drone_pos_cmd",  # 飞控订阅的位置指令话题
-            self.qos_reliable
+            "/attitude_position_cmd",
+            qos_reliable
         )
-
+        
+        # 发布调试信息
+        self.pub_debug = self.create_publisher(
+            Vector3,
+            "/position_debug",
+            qos_reliable
+        )
+        
+        # ========== 新增：详细调试信息发布者 ==========
+        self.pub_position_details = self.create_publisher(
+            Vector3,
+            "/position_control_details",
+            qos_reliable
+        )
+        
+        self.pub_pid_debug = self.create_publisher(
+            Vector3,
+            "/position_pid_debug",
+            qos_reliable
+        )
+        
+        self.pub_control_output = self.create_publisher(
+            Vector3,
+            "/position_control_output",
+            qos_reliable
+        )
+        
+        # ========== 新增：角度输出话题 ==========
+        # 用于在Foxglove中直接查看角度值（度）
+        self.pub_attitude_cmd_deg = self.create_publisher(
+            Vector3,
+            "/attitude_position_cmd_deg",
+            qos_reliable
+        )
+        
+        self.pub_control_output_deg = self.create_publisher(
+            Vector3,
+            "/position_control_output_deg",
+            qos_reliable
+        )
+        
     def _init_data(self):
-        """初始化数据存储变量"""
-        self.current_pose = None  # 动捕反馈的实际位置
-        # 默认目标位置（可通过/drone_target_pose话题覆盖）
-        self.target_pose = PoseStamped()
-        self.target_pose.pose.position.x = 0.0  # 初始原点
-        self.target_pose.pose.position.y = 0.0
-        self.target_pose.pose.position.z = 1.0  # 默认目标高度1m
-        self.last_mocap_time = 0.0  # 最后接收动捕数据的时间（用于超时判断）
-
-    def _mocap_pose_callback(self, msg):
-        """接收动捕的无人机实际位置"""
-        self.current_pose = msg
-        self.last_mocap_time = self.get_clock().now().nanoseconds / 1e9
-
-    def _target_pose_callback(self, msg):
-        """接收外部设置的目标位置（如上位机/脚本发布）"""
-        self.target_pose = msg
-        self.get_logger().info(
-            f"📌 更新目标位置：X={msg.pose.position.x:.2f}m | Y={msg.pose.position.y:.2f}m | Z={msg.pose.position.z:.2f}m"
-        )
-
-    def _control_loop(self):
-        """核心控制逻辑：位置误差→飞控的姿态/油门目标"""
-        # 1. 检查动捕数据有效性
-        if self.current_pose is None:
-            self.get_logger().warn("⚠️ 未收到动捕位置数据，暂停位置控制")
-            return
+        """初始化数据存储"""
+        self.current_pos = None
+        self.target_pos = np.array([0.0, 0.0, 1.0])  # 默认目标
+        self.filtered_pos = None
+        self.filtered_vel = None
+        self.last_mocap_time = 0
+        self.last_control_time = 0
+        self.mocap_active = False
+        self.control_count = 0
+        
+        # 调试数据
+        self.debug_data = {
+            "position_error": np.zeros(3),
+            "control_output": np.zeros(3),  # 弧度
+            "control_output_deg": np.zeros(3),  # 度（新增）
+            "pid_terms_xy": np.zeros(3),  # P, I, D
+            "pid_terms_z": np.zeros(3),   # P, I, D
+            "last_debug_time": 0
+        }
+        
+    def _init_pid_state(self):
+        """初始化PID状态"""
+        self.error_integral_xy = np.array([0.0, 0.0])
+        self.error_integral_z = 0.0
+        self.prev_error_xy = np.array([0.0, 0.0])
+        self.prev_error_z = 0.0
+        self.last_time = None
+        
+        # PID项记录
+        self.p_term_xy = np.array([0.0, 0.0])
+        self.i_term_xy = np.array([0.0, 0.0])
+        self.d_term_xy = np.array([0.0, 0.0])
+        
+        self.p_term_z = 0.0
+        self.i_term_z = 0.0
+        self.d_term_z = 0.0
+        
+    def _mocap_callback(self, msg):
+        """动捕数据回调"""
         current_time = self.get_clock().now().nanoseconds / 1e9
-        dt = current_time - self.last_mocap_time if self.last_mocap_time != 0 else 1.0/cfg.CONTROL_FREQ
-
-        # 2. 提取实际位置和目标位置
-        actual_x = self.current_pose.pose.position.x
-        actual_y = self.current_pose.pose.position.y
-        actual_z = self.current_pose.pose.position.z
-        target_x = self.target_pose.pose.position.x
-        target_y = self.target_pose.pose.position.y
-        target_z = self.target_pose.pose.position.z
-
-        # 3. PID计算：位置误差→姿态/油门目标
-        pitch_target = self.pid_x.update(target_x, actual_x, dt)  # X位置误差→pitch角（rad）
-        roll_target = self.pid_y.update(target_y, actual_y, dt)   # Y位置误差→roll角（rad）
-        throttle_target = self.pid_z.update(target_z, actual_z, dt) + 500.0  # Z误差→油门（基础油门500）
-        throttle_target = np.clip(throttle_target, 0.0, 1000.0)  # 油门限幅0-1000
-
-        # 4. 构造并发布控制指令给飞控
-        pos_cmd_msg = Vector3()
-        pos_cmd_msg.x = roll_target    # 飞控的roll目标（rad）
-        pos_cmd_msg.y = pitch_target   # 飞控的pitch目标（rad）
-        pos_cmd_msg.z = throttle_target  # 飞控的throttle目标（0-1000）
-        self.pub_pos_cmd.publish(pos_cmd_msg)
-
-        # 5. 调试日志（可选）
-        self.get_logger().debug(
-            f"位置误差：X={target_x-actual_x:.2f}m | Y={target_y-actual_y:.2f}m | Z={target_z-actual_z:.2f}m | "
-            f"输出目标：Roll={np.rad2deg(roll_target):.1f}° | Pitch={np.rad2deg(pitch_target):.1f}° | Throttle={throttle_target:.0f}"
+        
+        # 提取位置
+        pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        
+        # 首次初始化
+        if self.current_pos is None:
+            self.current_pos = pos
+            self.filtered_pos = pos.copy()
+            self.filtered_vel = np.zeros(3)
+            self.last_time = current_time
+            self.mocap_active = True
+            self.get_logger().info(f"🎯 动捕数据就绪: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]m")
+            return
+        
+        # 计算时间差
+        dt = current_time - self.last_time
+        if dt < 0.001 or dt > 0.1:
+            dt = 1.0 / self.cfg.POSITION_CONTROL_FREQ
+        
+        # 计算速度
+        vel = (pos - self.current_pos) / dt
+        
+        # 滤波处理
+        if self.filtered_pos is not None:
+            self.filtered_pos = self.cfg.POSITION_FILTER_ALPHA_POS * pos + (1 - self.cfg.POSITION_FILTER_ALPHA_POS) * self.filtered_pos
+            self.filtered_vel = self.cfg.POSITION_FILTER_ALPHA_VEL * vel + (1 - self.cfg.POSITION_FILTER_ALPHA_VEL) * self.filtered_vel
+        
+        # 更新数据
+        self.current_pos = pos
+        self.last_mocap_time = current_time
+        self.last_time = current_time
+        self.mocap_active = True
+        
+    def _target_callback(self, msg):
+        """目标位置回调"""
+        old_target = self.target_pos.copy()
+        self.target_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        
+        # 如果目标变化较大，重置积分器
+        if np.linalg.norm(self.target_pos - old_target) > 0.5 and self.target_pos[2] > 0.1:
+            self.error_integral_xy = np.array([0.0, 0.0])
+            self.error_integral_z = 0.0
+            self.get_logger().info("🔄 目标位置变化较大，重置PID积分")
+            
+        self.get_logger().info(
+            f"📌 目标位置: X={self.target_pos[0]:.2f}m, Y={self.target_pos[1]:.2f}m, Z={self.target_pos[2]:.2f}m"
         )
+        
+    def _mocap_to_body_coordinates(self, mocap_pos):
+        """将动捕坐标系转换到无人机机体坐标系
+        
+        动捕坐标系(Nokov): 
+          - Y轴: 向前
+          - X轴: 向右  
+          - Z轴: 向上
+        
+        无人机机体坐标系(FRD):
+          - X轴: 向前
+          - Y轴: 向右
+          - Z轴: 向下
+          
+        修正：高度使用动捕坐标系（Z向上为正），但为了保持一致性，我们转换Z但不改变符号
+        """
+        body_x = -mocap_pos[1]    # 动捕Y → 机体X（前）
+        body_y = mocap_pos[0]     # 动捕X → 机体Y（右）
+        body_z = mocap_pos[2]     # 动捕Z → 保持原值（动捕坐标系）
+        return np.array([body_x, body_y, body_z])
+        
+    def _position_pid_control(self, dt):
+        """位置PID控制核心算法（修正坐标转换和高度控制）"""
+        if dt <= 0 or self.current_pos is None or self.filtered_pos is None:
+            return 0.0, 0.0, self.cfg.POSITION_BASE_THROTTLE
+            
+        # 使用滤波后的位置
+        current_pos = self.filtered_pos
+        
+        # ========== XY坐标转换 ==========
+        # 将动捕坐标转换为机体坐标（仅XY）
+        current_body = self._mocap_to_body_coordinates(current_pos)
+        target_body = self._mocap_to_body_coordinates(self.target_pos)
+        
+        # 计算XY位置误差（在机体坐标系中）
+        error_body = target_body - current_body
+        
+        # 分解XY误差
+        error_x = error_body[0]  # 前向误差（机体X）
+        error_y = error_body[1]  # 右向误差（机体Y）
+        
+        # ========== 修正：高度误差计算 ==========
+        # 高度直接使用动捕坐标系：Z向上为正
+        # 目标在上方时，error_z应该为正
+        error_z = self.target_pos[2] - current_pos[2]
+        
+        # 在机体坐标系中计算XY误差
+        error_xy = np.array([error_x, error_y])
+
+        # 添加高度误差详细调试
+        if self.control_count % 20 == 0:  # 每20个控制周期输出一次，避免日志过多
+            self.get_logger().info(
+                f"📊 高度误差调试 | "
+                f"动捕高度={current_pos[2]:.2f}m | "
+                f"动捕目标高度={self.target_pos[2]:.2f}m | "
+                f"高度误差={error_z:.2f}m | "
+                f"基础油门={self.cfg.POSITION_BASE_THROTTLE:.0f}"
+            )
+        
+        # 保存误差用于调试（动捕坐标系）
+        self.debug_data["position_error"] = np.array([
+            self.target_pos[0] - current_pos[0],
+            self.target_pos[1] - current_pos[1],
+            error_z  # 使用修正后的高度误差
+        ])
+        
+        # 死区处理（在机体坐标系中）
+        error_norm_xy = np.linalg.norm(error_xy)
+        if error_norm_xy < self.cfg.POSITION_DEADZONE_XY:
+            error_xy = np.zeros(2)
+        if abs(error_z) < self.cfg.POSITION_DEADZONE_Z:
+            error_z = 0.0
+            
+        # ========== XY轴PID控制 ==========
+        self.error_integral_xy += error_xy * dt
+        self.error_integral_xy = np.clip(
+            self.error_integral_xy, 
+            -self.cfg.POSITION_XY_INT_LIMIT, 
+            self.cfg.POSITION_XY_INT_LIMIT
+        )
+        
+        # 微分项
+        if self.filtered_vel is not None:
+            # 将动捕速度也转换到机体坐标系
+            mocap_vel = self.filtered_vel
+            body_vel = self._mocap_to_body_coordinates(mocap_vel) - self._mocap_to_body_coordinates(np.zeros(3))
+            derivative_xy = -body_vel[:2]  # 取负号，因为速度与误差方向相反
+        else:
+            derivative_xy = np.zeros(2)
+            
+        # PID计算
+        self.p_term_xy = self.cfg.POSITION_XY_KP * error_xy
+        self.i_term_xy = self.cfg.POSITION_XY_KI * self.error_integral_xy
+        self.d_term_xy = self.cfg.POSITION_XY_KD * derivative_xy
+        
+        output_xy = self.p_term_xy + self.i_term_xy + self.d_term_xy
+        
+        # 输出限幅
+        output_norm = np.linalg.norm(output_xy)
+        if output_norm > self.cfg.POSITION_XY_MAX_ANGLE:
+            output_xy = output_xy / output_norm * self.cfg.POSITION_XY_MAX_ANGLE
+            
+        # ========== Z轴PID控制（高度控制） ==========
+        # 重置高度积分项（避免之前的错误累积）
+        if abs(error_z) < 0.01:  # 如果高度误差很小，重置积分项
+            self.error_integral_z = 0.0
+            
+        self.error_integral_z += error_z * dt
+        self.error_integral_z = np.clip(
+            self.error_integral_z, 
+            -self.cfg.POSITION_Z_INT_LIMIT, 
+            self.cfg.POSITION_Z_INT_LIMIT
+        )
+        
+        # 微分项（使用动捕坐标系的速度）
+        if self.filtered_vel is not None:
+            derivative_z = -self.filtered_vel[2]  # 使用动捕Z速度，取负号
+        else:
+            derivative_z = 0.0
+            
+        # PID计算（油门增量）
+        # 确保PID参数是正数：正误差（目标在上方）应该增加油门
+        self.p_term_z = self.cfg.POSITION_Z_KP * error_z
+        self.i_term_z = self.cfg.POSITION_Z_KI * self.error_integral_z
+        self.d_term_z = self.cfg.POSITION_Z_KD * derivative_z
+        
+        throttle_increment = self.p_term_z + self.i_term_z + self.d_term_z
+
+        # ========== 新增：油门计算调试 ==========
+        if self.control_count % 20 == 0:
+            self.get_logger().info(
+                f"📊 油门计算调试 | "
+                f"KP={self.cfg.POSITION_Z_KP} | "
+                f"P项={self.p_term_z:.0f} | "
+                f"I项={self.i_term_z:.0f} | "
+                f"D项={self.d_term_z:.0f} | "
+                f"油门增量={throttle_increment:.0f} | "
+                f"范围限制=[{-self.cfg.POSITION_Z_THROTTLE_RANGE}, {self.cfg.POSITION_Z_THROTTLE_RANGE}]"
+            )
+        
+        # 油门限幅
+        throttle_increment = np.clip(
+            throttle_increment, 
+            -self.cfg.POSITION_Z_THROTTLE_RANGE, 
+            self.cfg.POSITION_Z_THROTTLE_RANGE
+        )
+        
+        # 最终油门
+        throttle_output = self.cfg.POSITION_BASE_THROTTLE + throttle_increment
+        throttle_output = np.clip(throttle_output, 1000.0, 2000.0)
+        
+        # ========== 新增：最终油门调试 ==========
+        if self.control_count % 20 == 0:
+            self.get_logger().info(
+                f"📊 最终油门调试 | "
+                f"基础油门={self.cfg.POSITION_BASE_THROTTLE:.0f} | "
+                f"油门增量={throttle_increment:.0f} | "
+                f"最终油门={throttle_output:.0f}"
+            )
+        
+        # ========== 生成控制指令 ==========
+        # 注意：机体坐标系中：
+        #   - error_x（前向误差） → pitch指令（俯仰）
+        #   - error_y（右向误差） → roll指令（横滚）
+        #   
+        # 如果error_x为正（目标在前方） → 需要负pitch（前倾）来向前飞
+        # 如果error_y为正（目标在右方） → 需要正roll（右倾）来向右飞
+        
+        # 使用PID输出生成指令（output_xy已经考虑了误差方向）
+        roll_cmd = float(output_xy[1])   # Y分量 → roll指令
+        pitch_cmd = float(output_xy[0])  # X分量 → pitch指令
+        
+        # 保存控制输出用于调试（弧度）
+        self.debug_data["control_output"] = np.array([roll_cmd, pitch_cmd, throttle_output])
+        
+        # 保存角度输出（度）
+        self.debug_data["control_output_deg"] = np.array([
+            np.rad2deg(roll_cmd),
+            np.rad2deg(pitch_cmd),
+            throttle_output  # 油门值保持不变
+        ])
+        
+        # 保存PID项用于调试
+        self.debug_data["pid_terms_xy"] = np.array([
+            np.linalg.norm(self.p_term_xy),
+            np.linalg.norm(self.i_term_xy),
+            np.linalg.norm(self.d_term_xy)
+        ])
+        
+        self.debug_data["pid_terms_z"] = np.array([
+            abs(self.p_term_z),
+            abs(self.i_term_z),
+            abs(self.d_term_z)
+        ])
+        
+        # 保存误差
+        self.prev_error_xy = error_xy
+        self.prev_error_z = error_z
+        
+        # 返回控制指令
+        return roll_cmd, pitch_cmd, throttle_output
+        
+    def _control_loop(self):
+        """主控制循环"""
+        self.control_count += 1
+        
+        # 检查动捕数据有效性
+        if not self._check_mocap_valid():
+            return
+            
+        # 计算时间间隔
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if self.last_time is None:
+            self.last_time = current_time
+            return
+            
+        dt = current_time - self.last_time
+        if dt < 0.001:
+            return
+            
+        # 位置PID计算
+        roll_cmd, pitch_cmd, throttle_cmd = self._position_pid_control(dt)
+        
+        # 发布控制指令给飞控（弧度）
+        cmd_msg = Vector3()
+        cmd_msg.x = roll_cmd
+        cmd_msg.y = pitch_cmd
+        cmd_msg.z = throttle_cmd
+        self.pub_attitude_cmd.publish(cmd_msg)
+        
+        # 发布角度指令用于调试（度）
+        cmd_deg_msg = Vector3()
+        cmd_deg_msg.x = np.rad2deg(roll_cmd)
+        cmd_deg_msg.y = np.rad2deg(pitch_cmd)
+        cmd_deg_msg.z = throttle_cmd  # 油门保持不变
+        self.pub_attitude_cmd_deg.publish(cmd_deg_msg)
+        
+        # 发布控制输出调试信息（弧度）
+        output_msg = Vector3()
+        output_msg.x = roll_cmd
+        output_msg.y = pitch_cmd
+        output_msg.z = throttle_cmd
+        self.pub_control_output.publish(output_msg)
+        
+        # 发布控制输出调试信息（度）
+        output_deg_msg = Vector3()
+        output_deg_msg.x = np.rad2deg(roll_cmd)
+        output_deg_msg.y = np.rad2deg(pitch_cmd)
+        output_deg_msg.z = throttle_cmd
+        self.pub_control_output_deg.publish(output_deg_msg)
+        
+        # 发布调试信息
+        if self.current_pos is not None:
+            debug_msg = Vector3()
+            if self.target_pos is not None:
+                debug_msg.x = self.target_pos[0] - self.current_pos[0]
+                debug_msg.y = self.target_pos[1] - self.current_pos[1]
+                debug_msg.z = self.target_pos[2] - self.current_pos[2]
+            self.pub_debug.publish(debug_msg)
+            
+        # 更新时间
+        self.last_time = current_time
+        
+    def _publish_detailed_debug(self):
+        """发布详细调试信息"""
+        if self.current_pos is None or self.target_pos is None:
+            return
+            
+        # 位置详细信息
+        details_msg = Vector3()
+        details_msg.x = self.target_pos[0]  # 目标X（动捕坐标系）
+        details_msg.y = self.current_pos[0] # 当前X（动捕坐标系）
+        details_msg.z = self.target_pos[0] - self.current_pos[0]  # X误差（动捕坐标系）
+        self.pub_position_details.publish(details_msg)
+        
+        # PID调试信息（每0.5秒发布一次）
+        current_time = time.time()
+        if current_time - self.debug_data["last_debug_time"] > 0.5:
+            pid_debug_msg = Vector3()
+            # XY PID项
+            pid_debug_msg.x = self.debug_data["pid_terms_xy"][0]  # P项
+            pid_debug_msg.y = self.debug_data["pid_terms_xy"][1]  # I项
+            pid_debug_msg.z = self.debug_data["pid_terms_xy"][2]  # D项
+            self.pub_pid_debug.publish(pid_debug_msg)
+            
+            # 日志输出
+            if self.mocap_active:
+                # 计算机体坐标系下的误差用于调试
+                if self.current_pos is not None and self.target_pos is not None:
+                    current_body = self._mocap_to_body_coordinates(self.current_pos)
+                    target_body = self._mocap_to_body_coordinates(self.target_pos)
+                    error_body = target_body - current_body
+                    
+                    self.get_logger().info(
+                        f"🎯 位置控制详情 | "
+                        f"动捕坐标: [{self.current_pos[0]:.2f}, {self.current_pos[1]:.2f}, {self.current_pos[2]:.2f}] | "
+                        f"机体坐标XY: [{current_body[0]:.2f}, {current_body[1]:.2f}] | "
+                        f"机体误差XY: [{error_body[0]:.2f}, {error_body[1]:.2f}] | "
+                        f"高度误差: {self.debug_data['position_error'][2]:.2f}m | "
+                        f"控制输出(度): R={self.debug_data['control_output_deg'][0]:.1f}°, P={self.debug_data['control_output_deg'][1]:.1f}°, T={self.debug_data['control_output_deg'][2]:.0f}"
+                    )
+            
+            self.debug_data["last_debug_time"] = current_time
+        
+    def _check_mocap_valid(self):
+        """检查动捕数据有效性"""
+        if self.current_pos is None:
+            if self.control_count % 100 == 0:
+                self.get_logger().warn("⚠️ 等待动捕数据...")
+            return False
+            
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # 检查超时
+        if current_time - self.last_mocap_time > self.cfg.POSITION_MOCAP_TIMEOUT:
+            if self.mocap_active:
+                self.mocap_active = False
+                self.get_logger().error("❌ 动捕数据超时，停止控制输出")
+            return False
+            
+        # 检查高度合理性（动捕坐标系中Z向上）
+        if self.current_pos[2] < 0:
+            self.get_logger().warn(f"⚠️ 检测到异常高度: {self.current_pos[2]:.2f}m")
+            return False
+            
+        return True
+        
+    def _publish_status(self):
+        """发布控制器状态"""
+        if self.current_pos is not None:
+            self.get_logger().info(
+                f"📊 位置控制状态 | "
+                f"动捕: {'✅' if self.mocap_active else '❌'} | "
+                f"动捕位置: [{self.current_pos[0]:.2f}, {self.current_pos[1]:.2f}, {self.current_pos[2]:.2f}]m"
+            )
+            
+    def reset_controller(self):
+        """重置控制器"""
+        self.error_integral_xy = np.array([0.0, 0.0])
+        self.error_integral_z = 0.0
+        self.mocap_active = False
+        self.get_logger().info("🔄 位置控制器已重置")
+        
+    def destroy_node(self):
+        """节点销毁"""
+        self.get_logger().info("🛑 正在关闭位置控制器...")
+        super().destroy_node()
 
 def main(args=None):
-    """主函数：启动位置控制器节点"""
+    """主函数"""
     rclpy.init(args=args)
-    position_controller = DronePositionController()
+    
     try:
-        rclpy.spin(position_controller)
+        controller = DronePositionController()
+        rclpy.spin(controller)
     except KeyboardInterrupt:
-        position_controller.get_logger().info("🛑 用户中断，停止位置控制器")
+        controller.get_logger().info("🛑 用户中断位置控制器")
+    except Exception as e:
+        controller.get_logger().error(f"❌ 位置控制器运行异常: {e}")
     finally:
-        position_controller.destroy_node()
+        if 'controller' in locals():
+            controller.destroy_node()
         rclpy.shutdown()
 
 if __name__ == "__main__":

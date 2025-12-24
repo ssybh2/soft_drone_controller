@@ -32,7 +32,9 @@ setup(
     # 节点入口（终端可直接启动）
     entry_points={
         'console_scripts': [
-            'drone_controller = soft_drone_controller.drone_controller:main'
+            'drone_controller = soft_drone_controller.drone_controller:main',
+            'position_control = soft_drone_controller.position_control:main',
+            'send_target = soft_drone_controller.send_target:main', 
         ],
     },
 )
