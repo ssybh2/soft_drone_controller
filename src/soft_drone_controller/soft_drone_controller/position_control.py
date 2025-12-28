@@ -122,7 +122,7 @@ class DronePositionController(Node):
     def _init_data(self):
         """初始化数据存储"""
         self.current_pos = None
-        self.target_pos = np.array([1.44,-2.04,1.0])  # 默认目标
+        self.target_pos = np.array([0.0,0.0,1.0])  # 默认目标
         self.filtered_pos = None
         self.filtered_vel = None
         self.last_mocap_time = 0

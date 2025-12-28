@@ -9,22 +9,22 @@ import numpy as np
 # ========== 1. 系统基本参数 ==========
 CONTROL_FREQ = 1000.0  # 控制频率（1000Hz）
 DATA_TIMEOUT = 0.3     # 数据超时时间（0.3s）
-
+Kp_ANGLE = 0.5
 # ========== 2. 遥控器参数 ==========
 RC_DEAD_ZONE = 0.05    # 摇杆死区（5%）
 THRUST_MID = 0.5       # 油门中位
 IDLE_THROTTLE = 0.0    # 怠速油门
-
+ATTITUDE_TIME_CONSTANT = 0.1
 # ========== 3. 姿态控制PID参数 ==========
 # 角度外环PID参数
-PID_ROLL_ANGLE = {"kp": 0.25, "ki": 0.0, "kd": 0.00, "i_max": 0.03, "i_min": -0.03}
-PID_PITCH_ANGLE = {"kp": 0.25, "ki": 0.0, "kd": 0.00, "i_max": 0.03, "i_min": -0.03}
-PID_YAW_ANGLE = {"kp": 0.08, "ki": 0.0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
+PID_ROLL_ANGLE = {"kp": 0.00002, "ki": 0.0, "kd": 0.001, "i_max": 0.03, "i_min": -0.03}
+PID_PITCH_ANGLE = {"kp": 0.00002, "ki": 0.0, "kd": 0.001, "i_max": 0.03, "i_min": -0.03}
+PID_YAW_ANGLE = {"kp": 0.002, "ki": 0.0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
 
 # 速率内环PID参数
-PID_ROLL_RATE = {"kp": 0.09, "ki": 0.00, "kd": 0.0008, "i_max": 0.01, "i_min": -0.01}
-PID_PITCH_RATE = {"kp": 0.09, "ki": 0.00, "kd": 0.0008, "i_max": 0.01, "i_min": -0.01}
-PID_YAW_RATE = {"kp": 0.09, "ki": 0.0, "kd": 0.01, "i_max": 0.01, "i_min": -0.01}
+PID_ROLL_RATE = {"kp": 0.0000002, "ki": 0.00, "kd": 0.001, "i_max": 0.3, "i_min": -0.3}
+PID_PITCH_RATE = {"kp": 0.0000002, "ki": 0.00, "kd": 0.001, "i_max": 0.3, "i_min": -0.3}
+PID_YAW_RATE = {"kp": 0.08, "ki": 0.08, "kd": 0.01*0.08, "i_max": 0.2, "i_min": -0.2}
 
 # ========== 4. 位置控制PID参数 ==========
 # XY位置控制参数（位置误差→姿态角）
@@ -53,8 +53,8 @@ POSITION_DEADZONE_Z = 0.05   # Z高度死区（m）
 POSITION_BASE_THROTTLE = 1000.0
 
 # ========== 5. 陀螺仪参数 ==========
-GYRO_DEADBAND_ROLL_PITCH = 200  # 横滚/俯仰陀螺仪死区（rad/s）
-GYRO_DEADBAND_YAW = 1.3         # 偏航陀螺仪死区（rad/s）
+GYRO_DEADBAND_ROLL_PITCH = 0.0  # 横滚/俯仰陀螺仪死区（rad/s）
+GYRO_DEADBAND_YAW = 0.0         # 偏航陀螺仪死区（rad/s）
 
 # ========== 6. 角度限制 ==========
 MAX_ROLL_PITCH_ANG = np.deg2rad(70)  # 最大横滚/俯仰角（70°）
@@ -70,10 +70,10 @@ DSHOT_SCALE = 500           # DSHOT缩放因子
 
 # ========== 8. 电机混控矩阵（X型布局） ==========
 MIX_MATRIX = [
-    [-1, 1, 1],   # 电机1：前左
-    [1, -1, 1],   # 电机2：后左
-    [1, 1, -1],   # 电机3：前右
-    [-1, -1, -1]  # 电机4：后右
+    [-1, 1, 1],   # 电机1
+    [ 1,-1, 1],   # 电机2
+    [ 1, 1,-1],   # 电机3
+    [-1,-1,-1]  # 电机4
 ]
 
 # ========== 9. 电机补偿参数 ==========
