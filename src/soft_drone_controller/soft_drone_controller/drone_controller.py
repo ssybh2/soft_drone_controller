@@ -299,7 +299,7 @@ class BalanceController(Node):
             axis="yaw"
         )
         self.pid_yaw_rate = ImprovedPID(
-            kp=cfg.PID_YAW_RATE["kp"] * 4.0,
+            kp=cfg.PID_YAW_RATE["kp"] * 15.0,
             ki=cfg.PID_YAW_RATE["ki"] * 0.0,
             kd=cfg.PID_YAW_RATE["kd"] * 0.6,
             i_max=0.1,
@@ -312,7 +312,7 @@ class BalanceController(Node):
     def _init_state(self):
         self.state = {
             "armed": False,
-            "stick_deadband": cfg.RC_DEAD_ZONE * 0.3,
+            #"stick_deadband": cfg.RC_DEAD_ZONE * 0.3,
             "motor_outputs": np.array([1000.0]*4),
             "init_quat": None,
             "initialized": False,
@@ -475,10 +475,13 @@ class BalanceController(Node):
                     self.get_logger().warn("⚠️ 位置指令超时，自动切换回手动模式")
                     throttle, roll_target, pitch_target, yaw_stick = self._process_stick()
                 else:
+                    
                     throttle_raw = np.clip(self.pos_cmd_data["throttle"], 1000.0, 2000.0)
                     roll_target = np.clip(self.pos_cmd_data["roll"], -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
                     pitch_target = np.clip(self.pos_cmd_data["pitch"], -cfg.MAX_ROLL_PITCH_ANG, cfg.MAX_ROLL_PITCH_ANG)
                     throttle = (throttle_raw - 1000.0) / 1000.0 * 1000.0
+                    #throttle, _, _, yaw_stick = self._process_stick()
+
                     _, _, _, yaw_stick = self._process_stick()
                     self.control_debug["position_cmd_valid"] = True
                     if int(current_time * 100) % 100 == 0:
@@ -500,10 +503,10 @@ class BalanceController(Node):
             self._publish_control_status()
 
     def _process_stick(self):
-        roll_raw = self.rc_data["right_x"] if abs(self.rc_data["right_x"]) > self.state["stick_deadband"] else 0.0
-        pitch_raw = self.rc_data["right_y"] if abs(self.rc_data["right_y"]) > self.state["stick_deadband"] else 0.0
-        yaw_raw = self.rc_data["left_x"] if abs(self.rc_data["left_x"]) > self.state["stick_deadband"]*0.5 else 0.0
-        throttle_raw = self.rc_data["left_y"]
+        roll_raw = self.rc_data["right_x"] if abs(self.rc_data["right_x"]) > cfg.RC_DEAD_ZONE_ROLL else 0.0
+        pitch_raw = self.rc_data["right_y"] if abs(self.rc_data["right_y"]) > cfg.RC_DEAD_ZONE_PITCH else 0.0
+        yaw_raw = self.rc_data["left_x"] if abs(self.rc_data["left_x"]) > cfg.RC_DEAD_ZONE_YAW else 0.0
+        throttle_raw = self.rc_data["left_y"] if abs(self.rc_data["left_y"]) > cfg.RC_DEAD_ZONE_THROTTLE else 0.0
         roll_target = roll_raw * cfg.MAX_ROLL_PITCH_ANG * 3
         pitch_target = pitch_raw * cfg.MAX_ROLL_PITCH_ANG * 3
         throttle = np.clip((throttle_raw + 1.0) / 2.0 * 1000.0, 0.0, 1000.0)
