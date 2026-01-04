@@ -37,6 +37,7 @@ setup(
             'send_target = soft_drone_controller.send_target:main', 
             'position_cmd = soft_drone_controller.position_cmd:main',
             'pos_path_to_nav_path = soft_drone_controller.pos_path_to_nav_path:main',
+            
         ],
     },
 )

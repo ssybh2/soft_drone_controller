@@ -23,44 +23,45 @@ ATTITUDE_TIME_CONSTANT = 0.1
 # 角度外环PID参数
 PID_ROLL_ANGLE = {"kp": 0.00002, "ki": 0.0, "kd": 0.001, "i_max": 0.03, "i_min": -0.03}
 PID_PITCH_ANGLE = {"kp": 0.00002, "ki": 0.0, "kd": 0.001, "i_max": 0.03, "i_min": -0.03}
-PID_YAW_ANGLE = {"kp": 0.002, "ki": 0.0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
+PID_YAW_ANGLE = {"kp": 0.12, "ki": 0.0, "kd": 0.00, "i_max": 0.02, "i_min": -0.02}
 
 # 速率内环PID参数
 PID_ROLL_RATE = {"kp": 0.0405, "ki": 0.01, "kd": 0.001, "i_max": 0.3, "i_min": -0.3}
 PID_PITCH_RATE = {"kp": 0.0405, "ki": 0.01, "kd": 0.001, "i_max": 0.3, "i_min": -0.3}
-PID_YAW_RATE = {"kp": 0.05, "ki": 0.08, "kd": 0.01*0.08, "i_max": 0.2, "i_min": -0.2}
+PID_YAW_RATE = {"kp": 0.05, "ki": 0.0, "kd": 0.01*0.08, "i_max": 0.2, "i_min": -0.2}
 
 # ========== 4. 位置控制PID参数 ==========
 DSHOT_MIN = 48
 DSHOT_MAX = 2047
+TAKEOFF_CLIMB_RATE = 0.15  # 起飞最大爬升速度（m/s）
 POSITION_DEFAULT_HEIGHT = 0.7
 HOVER_DSHOT_VALUE = 740
 HOVER_THROTTLE_RATIO = (HOVER_DSHOT_VALUE - DSHOT_MIN) / (DSHOT_MAX - DSHOT_MIN)
 MIN_DESCEND_DSHOT_VALUE = 720
 MIN_DESCEND_THROTTLE_RATIO = (MIN_DESCEND_DSHOT_VALUE - DSHOT_MIN) / (DSHOT_MAX - DSHOT_MIN)
 # XY位置控制参数（位置误差→姿态角）
-POSITION_XY_KP = 0.1     # 比例增益（rad/m）
+POSITION_XY_KP = 0.2     # 比例增益（rad/m）
 POSITION_XY_KI = 0.0     # 积分增益
-POSITION_XY_KD = 0.005   # 微分增益
-POSITION_XY_INT_LIMIT = 0.5   # XY积分限幅
-POSITION_XY_MAX_ANGLE = 0.5   # 最大倾角指令（rad）
+POSITION_XY_KD = 0.0   # 微分增益
+POSITION_XY_INT_LIMIT = 0.2   # XY积分限幅
+POSITION_XY_MAX_ANGLE = 0.35   # 最大倾角指令（rad）
 
 # Z高度控制参数（高度误差→油门）
-POSITION_Z_KP = 0.013      # 比例增益（throttle/m）
+POSITION_Z_KP = 0.04      # 比例增益（throttle/m）
 POSITION_Z_KI = 0.0       # 积分增益
-POSITION_Z_KD = 0.018      # 微分增益
-POSITION_Z_INT_LIMIT = 0.78   # Z积分限幅
+POSITION_Z_KD = 0.01      # 微分增益
+POSITION_Z_INT_LIMIT = 0.1   # Z积分限幅
 #POSITION_Z_THROTTLE_RANGE = 300  # 油门增量范围
 
 
 # 速度环 (输出期望加速度)
-VELOCITY_XY_KP = 0.13
+VELOCITY_XY_KP = 0.17
 VELOCITY_XY_KI = 0.0
-VELOCITY_XY_KD = 0.0
-VELOCITY_XY_INT_LIMIT = 1.0 # 加速度上限
-VELOCITY_Z_KP = 0.1
-VELOCITY_Z_KI = 0.5
-VELOCITY_Z_KD = 0.1
+VELOCITY_XY_KD = 0.04
+VELOCITY_XY_INT_LIMIT = 0.25 # 加速度上限
+VELOCITY_Z_KP = 0.07
+VELOCITY_Z_KI = 0.0
+VELOCITY_Z_KD = 0.05
 VELOCITY_Z_INT_LIMIT = 1.0 # 加速度上限
 
 # 位置控制滤波器参数
@@ -79,7 +80,7 @@ GYRO_DEADBAND_ROLL_PITCH = 0.0  # 横滚/俯仰陀螺仪死区（rad/s）
 GYRO_DEADBAND_YAW = 0.0         # 偏航陀螺仪死区（rad/s）
 
 # ========== 6. 角度限制 ==========
-MAX_ROLL_PITCH_ANG = np.deg2rad(70)  # 最大横滚/俯仰角（70°）
+MAX_ROLL_PITCH_ANG = np.deg2rad(30)  # 最大横滚/俯仰角（70°）
 MAX_YAW_ANGLE = np.deg2rad(45)       # 最大偏航角（45°）
 MAX_YAW_RATE = np.deg2rad(200)       # 最大偏航速率（200°/s）
 
