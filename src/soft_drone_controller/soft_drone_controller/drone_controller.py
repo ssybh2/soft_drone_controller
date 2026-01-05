@@ -17,7 +17,6 @@ def wrap_pi(a):
     return float(np.arctan2(np.sin(a), np.cos(a)))
 
 
-# ====================== Quaternion / Rotation Utilities ======================
 def quat_normalize(q):
     q = np.asarray(q, dtype=float)
     n = np.linalg.norm(q)
@@ -118,7 +117,6 @@ def calculateErrorQuaternion(q_cmd, q_meas):
 
 
 def rotate_gyro_data(roll_gyro, pitch_gyro, yaw_gyro):
-    # ✅ 完全保留你的手动逻辑（不要动）
     return np.array([roll_gyro, -pitch_gyro, -yaw_gyro], dtype=float)
 
 
@@ -129,7 +127,6 @@ def pwm_to_dshot(pwm_val):
     return int(round(dshot_val))
 
 
-# ===================== PID控制器类 =====================
 class ImprovedPID:
     def __init__(self, kp, ki, kd, i_max=0.5, i_min=-0.5, use_angular_acc=True, node=None, axis=""):
         self.kp = kp
@@ -168,7 +165,6 @@ class ImprovedPID:
         else:
             error = setpoint - measurement
 
-        # deadbands
         if self.axis in ["roll", "pitch"]:
             if abs(error) < 0.015:
                 self.integral = 0.0
@@ -211,12 +207,10 @@ class ImprovedPID:
         self.last_output = 0.0
 
 
-# ===================== 主控制器 =====================
 class BalanceController(Node):
     def __init__(self):
         super().__init__("drone_controller_node")
 
-        # ✅ 保持与你当前飞控一致
         self.ENABLE_FRD_TO_FLU_FIX = True
         self.YAW_POSITIVE_CW = True
 
@@ -245,16 +239,12 @@ class BalanceController(Node):
         self.pub_imu_gyro = self.create_publisher(Vector3, "/imu_gyro", qos_reliable)
         self.pub_dshot = self.create_publisher(WriteDSHOT, "/ecat/sn2228293/app3/write", 10)
         self.pub_torque_output = self.create_publisher(Vector3, "/torque_output", qos_reliable)
-        self.pub_control_status = self.create_publisher(Vector3, "/fc_control_status", qos_reliable)
-        self.pub_control_mode_info = self.create_publisher(Vector3, "/control_mode_info", qos_reliable)
-        self.pub_position_cmd_status = self.create_publisher(Vector3, "/position_cmd_status", qos_reliable)
-        self.pub_control_details = self.create_publisher(Vector3, "/control_details", qos_reliable)
 
         self.sub_rc = self.create_subscription(ReadDJIRC, "/ecat/sn2228293/app1/read", self._rc_callback, qos_best_effort)
         self.sub_imu = self.create_subscription(Imu, "/ecat/sn2228293/app2/read", self._imu_callback, qos_best_effort)
         self.sub_filtered_acc = self.create_subscription(Vector3, "/filtered_angular_acceleration", self._filtered_acc_callback, qos_reliable)
         self.sub_pos_cmd = self.create_subscription(Vector3, "/attitude_position_cmd", self._pos_cmd_callback, qos_reliable)
-        self.sub_mocap_pose = self.create_subscription(PoseStamped, "/Tracker0/pose", self._mocap_pose_callback, qos_best_effort)
+        self.sub_mocap_pose = self.create_subscription(PoseStamped, "/Tracker0/pose", self._mocap_pose_callback, qos_reliable)
         self.sub_yaw_sp = self.create_subscription(Float64, "/yaw_hold_sp", self._yaw_sp_callback, qos_reliable)
 
         self.lock = threading.Lock()
@@ -305,8 +295,8 @@ class BalanceController(Node):
         self.q_align_valid = False
 
         self.R_wi_wm = np.array([[0.0, 1.0, 0.0],
-                                [-1.0, 0.0, 0.0],
-                                [0.0, 0.0, 1.0]], dtype=float)
+                                 [-1.0, 0.0, 0.0],
+                                 [0.0, 0.0, 1.0]], dtype=float)
         self.q_wi_wm = quat_from_rotmat(self.R_wi_wm)
 
         self.R_b_t = np.array([[0.0, 1.0, 0.0],
@@ -368,7 +358,6 @@ class BalanceController(Node):
         return quat_normalize(np.array([w, x, y, z]))
 
     def _imu_callback(self, msg: Imu):
-        # ✅ MANUAL 完全保持不变
         with self.lock:
             q_abs = np.array([msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z], dtype=float)
             q_abs = self._correct_quat_sign(q_abs)
@@ -430,7 +419,7 @@ class BalanceController(Node):
     def _pos_cmd_callback(self, msg):
         with self.lock:
             self.pos_cmd_data["roll"] = msg.x
-            self.pos_cmd_data["pitch"] = msg.y   # ✅ 不取反（与你修复一致）
+            self.pos_cmd_data["pitch"] = msg.y
             self.pos_cmd_data["throttle"] = msg.z
             self.last_pos_cmd_time = self.get_clock().now().nanoseconds / 1e9
 
@@ -570,7 +559,6 @@ class BalanceController(Node):
         self.pos_att["quat_abs_wi"] = quat_yawfix
         self.pos_att["src"] = "IMU_ALIGNED_YAWFIX" if src == "IMU_ALIGNED" else src
 
-        # 保持输出：roll/pitch/yaw 一致
         r2, p2, _ = quat_to_eul(quat_yawfix)
         self.pos_att["roll"] = float(r2)
         self.pos_att["pitch"] = float(p2) * (-1.0)
@@ -611,9 +599,7 @@ class BalanceController(Node):
         else:
             omega_sp_yaw = float(yaw_rate_cmd)
 
-        # ✅ 核心修复：POSITION setpoint yaw 用 yaw_target（不是 yaw_measured）
         yaw_for_setpoint = yaw_target if self.control_mode == "POSITION" else yaw_measured
-
         quat_setpoint = eul2quat_matlab([pitch_target, roll_target, yaw_for_setpoint])
 
         if self.control_mode == "POSITION":
@@ -652,12 +638,6 @@ class BalanceController(Node):
                 f"yaw_used={np.rad2deg(yaw_for_setpoint):.1f}"
             )
             self.state["last_debug_time"] = time.time()
-
-        torque_msg = Vector3()
-        torque_msg.x = float(torque_roll)
-        torque_msg.y = float(torque_pitch)
-        torque_msg.z = float(torque_yaw)
-        self.pub_torque_output.publish(torque_msg)
 
         return torque_roll, torque_pitch, torque_yaw
 
@@ -706,7 +686,6 @@ class BalanceController(Node):
             self.get_logger().warn(f"⚠️ DSHOT publish failed: {e}")
 
     def _publish_status(self):
-        # ✅ 你原来就有这个 timer callback，这里保留
         if not self.state["armed"]:
             return
         current_time = time.time()
@@ -761,7 +740,6 @@ class BalanceController(Node):
             self.state["motor_outputs"] = motor_pwm
 
     def _process_stick(self):
-        # ✅ 保持你的手动逻辑
         roll_raw = self.rc_data["right_x"] if abs(self.rc_data["right_x"]) > cfg.RC_DEAD_ZONE_ROLL else 0.0
         pitch_raw = self.rc_data["right_y"] if abs(self.rc_data["right_y"]) > cfg.RC_DEAD_ZONE_PITCH else 0.0
         yaw_raw = self.rc_data["left_x"] if abs(self.rc_data["left_x"]) > cfg.RC_DEAD_ZONE_YAW else 0.0

@@ -37,7 +37,6 @@ def rotmat_from_quat(q):
 
 
 def yaw_from_rotmat(R):
-    # yaw around +Z (Z-up), CCW positive
     return float(np.arctan2(R[1, 0], R[0, 0]))
 
 
@@ -130,50 +129,54 @@ class PositionController(Node):
             depth=10
         )
 
-        # 与飞控一致：yaw 顺时针为正
+        # ===== 配置 =====
         self.YAW_POSITIVE_CW = True
-
-        # pitch 正方向：nose up 为正
         self.PITCH_POS_IS_NOSE_UP = True
-
-        # yaw 全由 mocap
         self.YAW_ONLY_MOCAP = True
-
-        # 统一 FRD
         self.ENABLE_FRD_TO_FLU_FIX = False
 
-        # ✅✅✅ 输出姿态增益（放大 roll/pitch 2~3 倍）
-        self.ATTITUDE_CMD_GAIN = 2.6   # 建议：2.0 -> 2.6 -> 3.0 逐步试
+        # 输出姿态增益（HOLD 的默认手感在这里）
+        self.ATTITUDE_CMD_GAIN = 2.6
+        self.ATT_GAIN_BASE = float(self.ATTITUDE_CMD_GAIN)  # 记住 base
+
+        # ===== ✅ PATH 专用“更紧”的增益（只在 PATH 生效）=====
+        self.PATH_POS_XY_KP = float(getattr(cfg, "PATH_POSITION_XY_KP", cfg.POSITION_XY_KP))
+        self.PATH_ATT_GAIN = float(getattr(cfg, "PATH_ATTITUDE_CMD_GAIN", self.ATTITUDE_CMD_GAIN))
+        self.POS_XY_KP_BASE = float(cfg.POSITION_XY_KP)
+
+        # HOLD(3) 目标点（Wm）
+        self.declare_parameter('hold_x', 0.0)
+        self.declare_parameter('hold_y', 0.0)
+        self.hold_x = float(self.get_parameter('hold_x').value)
+        self.hold_y = float(self.get_parameter('hold_y').value)
+
+        # ===== 新增：PATH 是否使用外部 yaw（/pos_path 第4项）=====
+        self.declare_parameter('path_use_external_yaw', True)
+        self.path_use_external_yaw = bool(self.get_parameter('path_use_external_yaw').value)
+
+        # 航线超时保护
+        self.path_timeout = 0.35
+        self.last_path_time = 0.0
 
         # ===== 订阅 =====
-        self.rc_sub = self.create_subscription(
-            ReadDJIRC, '/ecat/sn2228293/app1/read', self.rc_callback, qos_best_effort
-        )
-        self.pose_sub = self.create_subscription(
-            PoseStamped, '/Tracker0/pose', self.pose_callback, qos_best_effort
-        )
-        self.path_sub = self.create_subscription(
-            Float64MultiArray, '/pos_path', self.path_callback, qos_best_effort
-        )
-        self.imu_angle_sub = self.create_subscription(
-            Vector3, '/imu_angle', self.imu_angle_callback, qos_best_effort
-        )
-        self.mocap_pose_sub = self.create_subscription(
-            PoseStamped, '/Tracker0/pose', self.mocap_pose_callback, qos_best_effort
-        )
+        self.rc_sub = self.create_subscription(ReadDJIRC, '/ecat/sn2228293/app1/read', self.rc_callback, qos_best_effort)
+        self.pose_sub = self.create_subscription(PoseStamped, '/Tracker0/pose', self.pose_callback, qos_reliable)
+        self.path_sub = self.create_subscription(Float64MultiArray, '/pos_path', self.path_callback, qos_reliable)
+        self.imu_angle_sub = self.create_subscription(Vector3, '/imu_angle', self.imu_angle_callback, qos_best_effort)
+        self.mocap_pose_sub = self.create_subscription(PoseStamped, '/Tracker0/pose', self.mocap_pose_callback, qos_reliable)
 
         # ===== 发布 =====
         self.pos_cmd_pub = self.create_publisher(Vector3, '/attitude_position_cmd', qos_reliable)
         self.yaw_sp_pub = self.create_publisher(Float64, '/yaw_hold_sp', qos_reliable)
 
+        # yaw hold 模式
         self.YAW_HOLD_MODE = "CONST"
         self.YAW_HOLD_SP_DEG = 0.0
 
+        # /pos_path 坐标系：默认认为是 Wm
         self.PATH_IN_WM = True
 
         # Wm -> Wi
-        # Wm: x=Right, y=Front, z=Up
-        # Wi: x=Front, y=Left,  z=Up
         self.R_wi_wm = np.array([
             [0.0,  1.0, 0.0],
             [-1.0, 0.0, 0.0],
@@ -262,9 +265,9 @@ class PositionController(Node):
         self.last_ctrl_time = time.time()
         self.prev_locked = True
         self.last_log_time = 0.0
+        self.last_mode_print = ""
 
-        self.get_logger().info("✅ PositionController(FRD) 启动：已放大 roll/pitch 输出增益，先压住漂移")
-
+        self.get_logger().info("✅ PositionController 启动：right_switch=1 航线 / 3 定点悬停 / 2 手动")
         self.timer = self.create_timer(1.0 / cfg.POSITION_CONTROL_FREQ, self.do_control)
 
     # Wm -> Wi
@@ -276,6 +279,7 @@ class PositionController(Node):
 
     def path_callback(self, msg):
         self.path_data = msg
+        self.last_path_time = time.time()
 
     def imu_angle_callback(self, msg: Vector3):
         yaw_imu = wrap_pi(deg2rad(msg.z))
@@ -339,7 +343,7 @@ class PositionController(Node):
 
         self.vx_est_w = self.vx_lpf.update(vx_raw, dt)
         self.vy_est_w = self.vy_lpf.update(vy_raw, dt)
-        self.vz_est   = self.vz_lpf.update(vz_raw, dt)
+        self.vz_est = self.vz_lpf.update(vz_raw, dt)
 
         self.last_pose_x = xf
         self.last_pose_y = yf
@@ -359,7 +363,7 @@ class PositionController(Node):
         cy = np.cos(yaw_rad)
         sy = np.sin(yaw_rad)
 
-        vx_b =  cy * vx_w + sy * vy_w
+        vx_b = cy * vx_w + sy * vy_w
         vy_b_left = -sy * vx_w + cy * vy_w
         vy_b = -vy_b_left
         return float(vx_b), float(vy_b)
@@ -382,18 +386,17 @@ class PositionController(Node):
 
         if self.YAW_ONLY_MOCAP:
             if mocap_fresh:
-                return float(self.yaw_rad_mocap_wi), "MOCAP(Wi+Ext+FRD+CW)"
+                return float(self.yaw_rad_mocap_wi), "MOCAP"
             if self.has_mocap_yaw:
-                return float(self.yaw_rad_mocap_hold), "MOCAP_HOLD(FRD+CW)"
+                return float(self.yaw_rad_mocap_hold), "MOCAP_HOLD"
             return 0.0, "MOCAP_NONE"
 
         if mocap_fresh:
-            return float(self.yaw_rad_mocap_wi), "MOCAP(Wi+Ext+FRD+CW)"
-        return float(self.yaw_rad_imu), "IMU(rel+CW)"
+            return float(self.yaw_rad_mocap_wi), "MOCAP"
+        return float(self.yaw_rad_imu), "IMU"
 
     def _update_yaw_hold_sp(self, locked_edge=False):
         mode = str(self.YAW_HOLD_MODE).upper()
-
         if mode == "CONST":
             self.yaw_hold_sp = wrap_pi(deg2rad(self.YAW_HOLD_SP_DEG))
             return
@@ -402,17 +405,13 @@ class PositionController(Node):
             if locked_edge or self.yaw_hold_sp is None:
                 yaw, src = self._get_yaw_for_transform()
                 self.yaw_hold_sp = wrap_pi(yaw)
-                self.get_logger().info(
-                    f"🧭 Yaw锁定(LOCK_ON_ARM)：{np.rad2deg(self.yaw_hold_sp):.1f}deg (src={src})"
-                )
+                self.get_logger().info(f"🧭 Yaw锁定: {np.rad2deg(self.yaw_hold_sp):.1f}deg (src={src})")
             return
 
         if locked_edge or self.yaw_hold_sp is None:
             yaw, src = self._get_yaw_for_transform()
             self.yaw_hold_sp = wrap_pi(yaw)
-            self.get_logger().info(
-                f"🧭 Yaw锁定(DEFAULT)：{np.rad2deg(self.yaw_hold_sp):.1f}deg (src={src})"
-            )
+            self.get_logger().info(f"🧭 Yaw锁定: {np.rad2deg(self.yaw_hold_sp):.1f}deg (src={src})")
 
     def _publish_yaw_sp(self):
         if self.yaw_hold_sp is None:
@@ -421,17 +420,28 @@ class PositionController(Node):
         m.data = float(self.yaw_hold_sp)
         self.yaw_sp_pub.publish(m)
 
+    # ===== ✅ 新增：只在 PATH 模式应用更大的增益 =====
+    def _apply_mode_gains(self, use_path: bool):
+        if use_path:
+            # PATH：更紧的 XY 位置 KP + 更大的姿态输出增益
+            self.x_loop.kp = float(self.PATH_POS_XY_KP)
+            self.y_loop.kp = float(self.PATH_POS_XY_KP)
+            self.ATTITUDE_CMD_GAIN = float(self.PATH_ATT_GAIN)
+        else:
+            # HOLD/OTHER：恢复原手感
+            self.x_loop.kp = float(self.POS_XY_KP_BASE)
+            self.y_loop.kp = float(self.POS_XY_KP_BASE)
+            self.ATTITUDE_CMD_GAIN = float(self.ATT_GAIN_BASE)
+
     def do_control(self):
         if self.rc_data is None or self.pose_data is None:
             return
 
         locked = (self.rc_data.left_switch == cfg.LOCK_SWITCH_VALUE)
-
         if locked:
             self.prev_locked = True
             self.height_sp = None
             self.yaw_hold_sp = None
-
             self.x_loop.reset(); self.y_loop.reset(); self.z_loop.reset()
             self.x_vel_loop.reset(); self.y_vel_loop.reset()
             self.vx_sp_lpf.reset(0.0); self.vy_sp_lpf.reset(0.0); self.vz_sp_lpf.reset(0.0)
@@ -442,13 +452,11 @@ class PositionController(Node):
         locked_edge = False
         if self.prev_locked and not locked:
             locked_edge = True
-            current_z = float(self.z_f.filtered_)
-            self.height_sp = float(current_z)
+            current_z0 = float(self.z_f.filtered_)
+            self.height_sp = float(current_z0)
             self.height_target = float(self.default_height)
             self.z_loop.reset()
-            self.get_logger().info(
-                f"🟢 解锁：锁定高度 {self.height_sp:.2f}m -> 平滑爬升到 {self.height_target:.2f}m"
-            )
+            self.get_logger().info(f"🟢 解锁：锁定高度 {self.height_sp:.2f}m -> 爬升到 {self.height_target:.2f}m")
             self.prev_locked = False
 
         now = time.time()
@@ -460,25 +468,77 @@ class PositionController(Node):
         current_y = float(self.y_f.filtered_)
         current_z = float(self.z_f.filtered_)
 
-        self._update_height_sp_planA(current_z, dt_ctrl)
-
         vx_now_w = float(self.vx_est_w)
         vy_now_w = float(self.vy_est_w)
-        vz_now   = float(self.vz_est)
 
-        path = self.path_data.data if len(self.path_data.data) >= 2 else [0.0, 0.0]
-        raw_tx = float(path[0])
-        raw_ty = float(path[1])
+        rs = int(self.rc_data.right_switch)
+        use_path = (rs == 1)
+        use_hold = (rs == 3)
 
-        if self.PATH_IN_WM:
-            target_x, target_y, _ = self._wm_to_wi(raw_tx, raw_ty, 0.0)
-            path_src = "Wm->Wi"
-        else:
-            target_x, target_y = raw_tx, raw_ty
-            path_src = "Wi"
+        # ===== ✅ 在这里应用“模式增益” =====
+        self._apply_mode_gains(use_path=use_path)
 
+        mode_name = "PATH(1)" if use_path else ("HOLD(3)" if use_hold else "OTHER")
+        if mode_name != self.last_mode_print:
+            self.last_mode_print = mode_name
+            self.get_logger().info(f"🎛️ 子模式切换: right_switch={rs} -> {mode_name} | "
+                                   f"XY_KP={self.x_loop.kp:.2f} ATT_GAIN={self.ATTITUDE_CMD_GAIN:.2f}")
+
+        target_x = float(current_x)
+        target_y = float(current_y)
         target_z = float(self.height_sp if self.height_sp is not None else current_z)
+        coord_src = "Wi(HOLD_CURRENT)"
+        raw_src = "SAFE_DEFAULT"
+        raw_yaw = None
+        path_ok = False
+        yaw_sp_src = "HOLD/CONST"
 
+        if use_hold:
+            raw_tx = float(self.hold_x)
+            raw_ty = float(self.hold_y)
+            tx_wi, ty_wi, _ = self._wm_to_wi(raw_tx, raw_ty, 0.0)
+            target_x, target_y = tx_wi, ty_wi
+            raw_src = "HOLD_PARAM(Wm)"
+            coord_src = "Wm->Wi(HOLD)"
+            self._update_height_sp_planA(current_z, dt_ctrl)
+
+        elif use_path:
+            path_age = now - self.last_path_time
+            if (path_age < self.path_timeout) and (len(self.path_data.data) >= 2):
+                p = list(self.path_data.data)
+                raw_tx = float(p[0])
+                raw_ty = float(p[1])
+                raw_tz = float(p[2]) if len(p) >= 3 else None
+                raw_yaw = wrap_pi(float(p[3])) if len(p) >= 4 else None
+
+                if self.PATH_IN_WM:
+                    tx_wi, ty_wi, tz_wi = self._wm_to_wi(raw_tx, raw_ty, float(raw_tz) if raw_tz is not None else 0.0)
+                    target_x, target_y = tx_wi, ty_wi
+                    if raw_tz is not None:
+                        target_z = tz_wi
+                    coord_src = "Wm->Wi(PATH)"
+                else:
+                    target_x, target_y = raw_tx, raw_ty
+                    if raw_tz is not None:
+                        target_z = float(raw_tz)
+                    coord_src = "Wi(PATH)"
+
+                raw_src = f"PATH_OK(age={path_age:.2f}s,len={len(p)})"
+                path_ok = True
+
+                if raw_tz is None:
+                    self._update_height_sp_planA(current_z, dt_ctrl)
+            else:
+                raw_src = f"PATH_LOST(age={path_age:.2f}s) -> HOLD_CURRENT"
+                coord_src = "Wi(HOLD_CURRENT)"
+                self._update_height_sp_planA(current_z, dt_ctrl)
+
+        else:
+            raw_src = "OTHER -> HOLD_CURRENT"
+            coord_src = "Wi(HOLD_CURRENT)"
+            self._update_height_sp_planA(current_z, dt_ctrl)
+
+        # ===== 位置误差在 Wi 下做（Wm->Wi 后）=====
         e_w = np.array([target_x - current_x,
                         target_y - current_y,
                         target_z - current_z], dtype=float)
@@ -489,43 +549,67 @@ class PositionController(Node):
 
         vx_sp_w = self.x_loop.step(current_x, target_x_eff, dt_ctrl)
         vy_sp_w = self.y_loop.step(current_y, target_y_eff, dt_ctrl)
-        vz_sp   = self.z_loop.step(current_z, target_z, dt_ctrl)
+        vz_sp = self.z_loop.step(current_z, target_z, dt_ctrl)
 
         vx_sp_w = float(np.clip(vx_sp_w, -self.vxy_limit, self.vxy_limit))
         vy_sp_w = float(np.clip(vy_sp_w, -self.vxy_limit, self.vxy_limit))
-        vz_sp   = float(np.clip(vz_sp,   -self.vz_limit,  self.vz_limit))
+        vz_sp = float(np.clip(vz_sp, -self.vz_limit, self.vz_limit))
 
         vx_sp_w_f = self.vx_sp_lpf.update(vx_sp_w, dt_ctrl)
         vy_sp_w_f = self.vy_sp_lpf.update(vy_sp_w, dt_ctrl)
-        vz_sp_f   = self.vz_sp_lpf.update(vz_sp,   dt_ctrl)
+        vz_sp_f = self.vz_sp_lpf.update(vz_sp, dt_ctrl)
 
+        # ===== yaw_sp =====
         self._update_yaw_hold_sp(locked_edge=locked_edge)
+
+        if use_path and path_ok and (raw_yaw is not None) and self.path_use_external_yaw:
+            self.yaw_hold_sp = wrap_pi(raw_yaw)
+            yaw_sp_src = "PATH_YAW"
+        else:
+            yaw_sp_src = "HOLD/CONST"
+
         self._publish_yaw_sp()
 
+        # ===== 用于世界->机体系变换的 yaw（来自 mocap/imu）=====
         yaw, yaw_src = self._get_yaw_for_transform()
 
-        vx_sp_b,  vy_sp_b  = self._world_to_body_2d(vx_sp_w_f, vy_sp_w_f, yaw)
-        vx_now_b, vy_now_b = self._world_to_body_2d(vx_now_w,  vy_now_w,  yaw)
+        vx_sp_b, vy_sp_b = self._world_to_body_2d(vx_sp_w_f, vy_sp_w_f, yaw)
+        vx_now_b, vy_now_b = self._world_to_body_2d(vx_now_w, vy_now_w, yaw)
 
-        roll_cmd_raw  = self.y_vel_loop.step(vy_now_b, vy_sp_b, dt_ctrl)
+        roll_cmd_raw = self.y_vel_loop.step(vy_now_b, vy_sp_b, dt_ctrl)
         pitch_cmd_raw = self.x_vel_loop.step(vx_now_b, vx_sp_b, dt_ctrl)
 
-        # ✅✅✅ 放大输出（2~3倍）
-        roll_cmd_raw  *= self.ATTITUDE_CMD_GAIN
+        roll_cmd_raw *= self.ATTITUDE_CMD_GAIN
         pitch_cmd_raw *= self.ATTITUDE_CMD_GAIN
 
-        roll_cmd  = float(np.clip(roll_cmd_raw,  -self.max_angle, self.max_angle))
-
-        # ✅ 向前飞必须低头
+        roll_cmd = float(np.clip(roll_cmd_raw, -self.max_angle, self.max_angle))
         pitch_cmd = float(np.clip(-pitch_cmd_raw, -self.max_angle, self.max_angle))
 
-        roll_cmd  = self._slew(roll_cmd,  self.last_roll_cmd,  dt_ctrl, self.max_angle_rate)
+        roll_cmd = self._slew(roll_cmd, self.last_roll_cmd, dt_ctrl, self.max_angle_rate)
         pitch_cmd = self._slew(pitch_cmd, self.last_pitch_cmd, dt_ctrl, self.max_angle_rate)
         self.last_roll_cmd = roll_cmd
         self.last_pitch_cmd = pitch_cmd
 
+        #z_out_ratio_increment = float(np.clip(vz_sp_f, -0.08, 0.08))
+        #final_throttle_ratio = float(self.hover_th_ratio + z_out_ratio_increment)
+        #final_throttle_ratio = float(np.clip(final_throttle_ratio, cfg.MIN_DESCEND_THROTTLE_RATIO, 1.0))
+        #final_throttle_pwm = 1000.0 + final_throttle_ratio * 1000.0
+        # ===== Z -> throttle (带倾角推力补偿，防止 PATH 倾斜掉高/贴地) =====
         z_out_ratio_increment = float(np.clip(vz_sp_f, -0.08, 0.08))
-        final_throttle_ratio = float(self.hover_th_ratio + z_out_ratio_increment)
+
+        # 基础油门（hover）+ 高度环增量
+        base_ratio = float(self.hover_th_ratio + z_out_ratio_increment)
+
+        # --- 倾角补偿：用最终输出的姿态指令来补偿垂直分力 ---
+        # 注意：roll_cmd/pitch_cmd 是弧度
+        c = float(np.cos(roll_cmd) * np.cos(pitch_cmd))
+        c = float(np.clip(c, 0.35, 1.0))  # 防止极端情况除以太小（保守一点）
+
+        tilt_comp = 1.0 / c
+        tilt_comp = float(np.clip(tilt_comp, 1.0, 1.25))  # 补偿最大 1.25，避免突然冲高
+        final_throttle_ratio = base_ratio * tilt_comp
+
+        # 保底：不要低于最小下降油门
         final_throttle_ratio = float(np.clip(final_throttle_ratio, cfg.MIN_DESCEND_THROTTLE_RATIO, 1.0))
         final_throttle_pwm = 1000.0 + final_throttle_ratio * 1000.0
 
@@ -537,14 +621,15 @@ class PositionController(Node):
 
         if now - self.last_log_time > 0.8:
             self.last_log_time = now
+            yaw_sp_deg = np.rad2deg(self.yaw_hold_sp) if self.yaw_hold_sp is not None else 0.0
             self.get_logger().info(
-                f"[POS-FRD] path_src={path_src} | yaw({yaw_src})={np.rad2deg(yaw):.1f}deg | "
-                f"Wi_now=({current_x:.2f},{current_y:.2f},{current_z:.2f}) | "
-                f"Wi_tgt=({target_x:.2f},{target_y:.2f},{target_z:.2f}) | "
-                f"e_w=({e_w[0]:.2f},{e_w[1]:.2f},{e_w[2]:.2f}) | "
-                f"vx_sp_b={vx_sp_b:.2f} vy_sp_b={vy_sp_b:.2f} | "
-                f"roll={np.rad2deg(roll_cmd):.2f}deg pitch={np.rad2deg(pitch_cmd):.2f}deg | "
-                f"thr={final_throttle_pwm:.0f} | gain={self.ATTITUDE_CMD_GAIN:.2f}"
+                f"[POS] rs={rs} mode={mode_name} src={raw_src}/{coord_src} | "
+                f"yaw({yaw_src})={np.rad2deg(yaw):.1f}deg yaw_sp({yaw_sp_src})={yaw_sp_deg:.1f}deg | "
+                f"Wi_now=({current_x:.2f},{current_y:.2f},{current_z:.2f}) "
+                f"Wi_tgt=({target_x:.2f},{target_y:.2f},{target_z:.2f}) "
+                f"e=({e_w[0]:.2f},{e_w[1]:.2f},{e_w[2]:.2f}) | "
+                f"roll={np.rad2deg(roll_cmd):.2f} pitch={np.rad2deg(pitch_cmd):.2f} thr={final_throttle_pwm:.0f} | "
+                f"XY_KP={self.x_loop.kp:.2f} ATT_GAIN={self.ATTITUDE_CMD_GAIN:.2f}"
             )
 
 

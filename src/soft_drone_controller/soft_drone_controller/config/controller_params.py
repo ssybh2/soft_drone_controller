@@ -10,6 +10,7 @@ import numpy as np
 CONTROL_FREQ = 1000.0  # 控制频率（1000Hz）
 DATA_TIMEOUT = 0.3     # 数据超时时间（0.3s）
 Kp_ANGLE = 0.5
+
 # ========== 2. 遥控器参数 ==========
 #RC_DEAD_ZONE = 0.1    # 摇杆死区（5%）
 RC_DEAD_ZONE_ROLL = 0.03
@@ -19,6 +20,7 @@ RC_DEAD_ZONE_THROTTLE = 0.05
 THRUST_MID = 0.5       # 油门中位
 IDLE_THROTTLE = 0.0    # 怠速油门
 ATTITUDE_TIME_CONSTANT = 0.1
+
 # ========== 3. 姿态控制PID参数 ==========
 # 角度外环PID参数
 PID_ROLL_ANGLE = {"kp": 0.00002, "ki": 0.0, "kd": 0.001, "i_max": 0.03, "i_min": -0.03}
@@ -35,24 +37,30 @@ DSHOT_MIN = 48
 DSHOT_MAX = 2047
 TAKEOFF_CLIMB_RATE = 0.15  # 起飞最大爬升速度（m/s）
 POSITION_DEFAULT_HEIGHT = 0.7
-HOVER_DSHOT_VALUE = 740
+HOVER_DSHOT_VALUE = 760
 HOVER_THROTTLE_RATIO = (HOVER_DSHOT_VALUE - DSHOT_MIN) / (DSHOT_MAX - DSHOT_MIN)
 MIN_DESCEND_DSHOT_VALUE = 720
 MIN_DESCEND_THROTTLE_RATIO = (MIN_DESCEND_DSHOT_VALUE - DSHOT_MIN) / (DSHOT_MAX - DSHOT_MIN)
+
 # XY位置控制参数（位置误差→姿态角）
 POSITION_XY_KP = 0.2     # 比例增益（rad/m）
 POSITION_XY_KI = 0.0     # 积分增益
 POSITION_XY_KD = 0.0   # 微分增益
 POSITION_XY_INT_LIMIT = 0.2   # XY积分限幅
-POSITION_XY_MAX_ANGLE = 0.35   # 最大倾角指令（rad）
+POSITION_XY_MAX_ANGLE = 0.2   # 最大倾角指令（rad）
+
+# ======== ✅ 新增：PATH 模式专用“更紧”的跟踪增益（不影响 HOLD/MANUAL）========
+# 说明：
+# - PATH 的目标点在移动（动态目标），同样的 KP 往往会“追不上”，所以给 PATH 单独更大 KP 更合理
+# - 你可以先用 0.35；如果仍慢，可以试 0.45；如果开始抖，再往回退
+PATH_POSITION_XY_KP = 0.65
 
 # Z高度控制参数（高度误差→油门）
-POSITION_Z_KP = 0.04      # 比例增益（throttle/m）
+POSITION_Z_KP = 0.023      # 比例增益（throttle/m）
 POSITION_Z_KI = 0.0       # 积分增益
-POSITION_Z_KD = 0.01      # 微分增益
+POSITION_Z_KD = 0.0      # 微分增益
 POSITION_Z_INT_LIMIT = 0.1   # Z积分限幅
 #POSITION_Z_THROTTLE_RANGE = 300  # 油门增量范围
-
 
 # 速度环 (输出期望加速度)
 VELOCITY_XY_KP = 0.17
@@ -126,3 +134,8 @@ POSITION_MODE_VALUE = 3         # 位置控制模式位置
 POSITION_CMD_TIMEOUT = 0.2      # 位置指令超时时间（s）
 POSITION_CONTROL_FREQ = 1000.0   # 位置控制频率（Hz）
 POSITION_MOCAP_TIMEOUT = 0.5    # 动捕数据超时时间（s）
+
+# ======== ✅ 新增：PATH 模式专用姿态输出增益（只给 PATH 更“用力”，不影响 HOLD）========
+# 你当前 position_control 里 ATTITUDE_CMD_GAIN=2.6，这里给 PATH 用 3.3
+# 如果你觉得还慢，可以 3.8；如果开始抖或者过冲，就往回收
+PATH_ATTITUDE_CMD_GAIN = 3.8
