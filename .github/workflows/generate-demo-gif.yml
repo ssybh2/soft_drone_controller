@@ -3,8 +3,9 @@ name: Generate README Demo GIF
 on:
   push:
     paths:
-      - 'docs/assets/demo.mov'
-      - 'docs/assets/demo.mp4'
+      - 'docs/assets/*.mov'
+      - 'docs/assets/*.mp4'
+      - '.github/workflows/generate-demo-gif.yml'
   workflow_dispatch:
 
 permissions:
@@ -21,14 +22,13 @@ jobs:
         id: source
         shell: bash
         run: |
-          if [ -f docs/assets/demo.mov ]; then
-            echo "file=docs/assets/demo.mov" >> "$GITHUB_OUTPUT"
-          elif [ -f docs/assets/demo.mp4 ]; then
-            echo "file=docs/assets/demo.mp4" >> "$GITHUB_OUTPUT"
-          else
-            echo "No demo video found."
+          VIDEO=$(find docs/assets -maxdepth 1 -type f \( -iname '*.mov' -o -iname '*.mp4' \) | sort | head -n 1)
+          if [ -z "$VIDEO" ]; then
+            echo "No demo video found in docs/assets."
             exit 1
           fi
+          echo "Using source video: $VIDEO"
+          echo "file=$VIDEO" >> "$GITHUB_OUTPUT"
 
       - name: Generate optimized GIF
         run: |
@@ -40,6 +40,7 @@ jobs:
             -vf "fps=7,scale=520:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=32[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
             -loop 0 \
             docs/assets/demo.gif
+          ls -lh docs/assets/demo.gif
 
       - name: Switch README to GIF
         run: |
