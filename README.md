@@ -24,9 +24,9 @@ Main nodes include `drone_controller`, `position_control`, `position_cmd`, and `
 ## Demo
 
 <div align="center">
-  <img src="docs/assets/demo-placeholder.svg" width="760" alt="Flight demo placeholder">
+  <img src="docs/assets/demo.gif" width="760" alt="Flight demo placeholder">
   <br>
-  <sub>Demo video coming soon · upload docs/assets/demo.mov or demo.mp4</sub>
+  <sub>Auto-playing real-flight preview</sub>
 </div>
 
 ## Quick Start
