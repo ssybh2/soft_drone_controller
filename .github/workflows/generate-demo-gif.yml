@@ -48,7 +48,7 @@ jobs:
           p = Path('README.md')
           text = p.read_text()
           text = text.replace('docs/assets/demo-placeholder.svg', 'docs/assets/demo.gif')
-          text = text.replace('Demo video coming soon · upload `docs/assets/demo.mov` or `demo.mp4`', 'Auto-playing real-flight preview')
+          text = text.replace('Demo video coming soon · upload docs/assets/demo.mov or demo.mp4', 'Auto-playing real-flight preview')
           p.write_text(text)
           PY
 
