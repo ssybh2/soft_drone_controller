@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#1f2937"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="520" rx="28" fill="url(#bg)"/>
+  <circle cx="600" cy="225" r="62" fill="#ffffff" fill-opacity="0.10" stroke="#ffffff" stroke-opacity="0.26" stroke-width="2"/>
+  <path d="M582 191 L582 259 L636 225 Z" fill="#ffffff"/>
+  <text x="600" y="340" text-anchor="middle" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700">Flight Demo</text>
+  <text x="600" y="388" text-anchor="middle" fill="#9ca3af" font-family="Arial, Helvetica, sans-serif" font-size="22">Upload docs/assets/demo.mov or demo.mp4</text>
+</svg>
